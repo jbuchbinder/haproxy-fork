@@ -1,0 +1,97 @@
+HAPROXY API
+===========
+
+REST-type API to expose haproxy administration and stats.
+
+If haproxy is compiled with "-DUSE_API=1", it will enable this interface,
+which is located at $STATSURL/api/$COMMAND
+
+The list of possible values for $COMMAND are listed below.
+
+"pool.add" command
+------------------
+
+Dynamically add a server to a proxy. Takes a single argument, a URL encoded
+JSON string.
+
+Example:
+	http://localhost:60081/api/pool.add/%7B%22proxy%22%3A%22appli1-rewrite%22%2C%22server%22%3A%22xyz%22%2C%22addr%22%3A%22192.168.6.66%22%2C%22disabled%22%3Afalse%2C%22port%22%3A8080%7D
+
+Which is a URL encoded version of:
+	{"proxy":"appli1-rewrite","server":"xyz","addr":"192.168.6.66","disabled":false,"port":8080}
+
+Possible keys are:
+
+	proxy (string) - Destination proxy
+	server (string) - Descriptive name of server
+	addr (string) - Destination IP
+	disabled (bool) - Whether this will be initially disabled
+	port (int) - Destination port
+	check (bool) - Whether to perform health checks or not
+	check_addr (string) - Optional address to use for health checks
+	check_port (int) - Optional port to use for health checks
+	inter (int) - Check interval in ms
+	rise (int) - Time in iterations to come up
+	fall (int) - Time in iterations to come down
+	weight (int) - Initial load balancing weight
+
+"pool.remove" command
+----------------------
+
+Takes two arguments, proxy and server. Removes a server from a proxy
+permanently.
+
+(DOES NOT WORK AT THE MOMENT, DON'T USE)
+
+"pool.disable" command
+----------------------
+
+Takes two arguments, proxy and server. Puts a server in "maintenance" mode.
+
+"pool.enable" command
+---------------------
+
+Takes two arguments, proxy and server. Removes a server from "maintenance"
+mode.
+
+"pool.status" command
+---------------------
+
+Takes two arguments, proxy and server. Gets status for server.
+
+"pool.weight" command
+---------------------
+
+Takes three arguments: proxy, server and weight. Sets weight for a
+server in a proxy.
+
+"pool.contents" command
+-----------------------
+
+Takes one argument, proxy. Gets status for all servers in a proxy.
+
+"version" command
+-----------------
+
+This command takes no arguments, and returns the version of the API
+being served/supported by haproxy. This is completely arbitrary, and
+should/will change any time something seriously breaking comes along.
+If you pass nothing after api/, you'll probably get this.
+
+EXAMPLES
+========
+
+With the examples/haproxy.api.cfg config file....
+
+	http://localhost:60081/api/pool.status/appli4-backup/inst2
+
+would give the status of server inst2 in pool appli4-backup,
+
+	http://localhost:60081/api/pool.disable/appli4-backup/inst2
+
+would "disable" the server (put it in maintenance mode), and
+
+	http://localhost:60081/api/pool.enable/appli4-backup/inst2
+
+would "enable" the server (remove it from maintenance mode).
+

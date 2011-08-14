@@ -13,6 +13,7 @@
 #include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -190,6 +191,10 @@ static const char *http_err_msgs[HTTP_ERR_SIZE] = {
  * on strlen().
  */
 struct chunk http_err_chunks[HTTP_ERR_SIZE];
+
+#ifdef USE_API
+int get_api_parameter_length(char *p, bool allowslashes);
+#endif /* USE_API */
 
 #define FD_SETS_ARE_BITFIELDS
 #ifdef FD_SETS_ARE_BITFIELDS
@@ -7351,6 +7356,160 @@ int stats_check_uri(struct stream_interface *si, struct http_txn *txn, struct pr
 		return 0;
 
 	h += uri_auth->uri_len;
+
+#ifdef USE_API
+	/*
+         * Check to see if there are any calls to /api/ namespace, and
+         * route accordingly.
+         */
+	if (memcmp(h, "api/", 4) == 0) {
+		si->applet.ctx.stats.flags |= STAT_API;
+		
+		/*
+		 * Parsing rules here:
+		 * 1) Break off everything after /api/
+		 * 2) Look for another '/'. If there isn't one, treat the
+		 *    entire remainder as a command.
+		 * 3) If there was a '/', split there and pass the remainder
+		 *    as the argument. If not, parse POST data.
+		 */
+		h += 4;
+		if (*h == ' ') {
+			/* No command given */
+			si->applet.ctx.stats.api_action = STAT_API_CMD_NOOP;
+			return 1;
+		}
+		if (memcmp(h, STAT_API_CMD_VERSION, strlen(STAT_API_CMD_VERSION)) == 0) {
+			si->applet.ctx.stats.api_action = STAT_API_CMD_VERSION;
+			return 1;
+		}
+		if (memcmp(h, STAT_API_CMD_POOL_GETSERVERS, strlen(STAT_API_CMD_POOL_GETSERVERS)) == 0) {
+			si->applet.ctx.stats.api_action = STAT_API_CMD_POOL_GETSERVERS;
+			h += strlen(STAT_API_CMD_POOL_GETSERVERS);
+			if (*h != '/') {
+				si->applet.ctx.stats.api_action = STAT_API_CMD_NOOP;
+				return 1;
+			}
+			h++;
+			int paramlength = get_api_parameter_length( h, false );
+			char *param = malloc( paramlength + 1 );
+			memcpy( param, h, paramlength );
+			*(param + paramlength) = '\0';
+			si->applet.ctx.stats.api_data = param;
+			return 1;
+		}
+		if (memcmp(h, STAT_API_CMD_POOL_ENABLE, strlen(STAT_API_CMD_POOL_ENABLE)) == 0) {
+			si->applet.ctx.stats.api_action = STAT_API_CMD_POOL_ENABLE;
+			h += strlen(STAT_API_CMD_POOL_ENABLE);
+			if (*h != '/') {
+				si->applet.ctx.stats.api_action = STAT_API_CMD_NOOP;
+				return 1;
+			}
+			h++;
+			int paramlength = get_api_parameter_length( h, true );
+			char *param = malloc( paramlength + 1 );
+			memcpy( param, h, paramlength );
+			*(param + paramlength) = '\0';
+			si->applet.ctx.stats.api_data = param;
+			return 1;
+		}
+		if (memcmp(h, STAT_API_CMD_POOL_DISABLE, strlen(STAT_API_CMD_POOL_DISABLE)) == 0) {
+			si->applet.ctx.stats.api_action = STAT_API_CMD_POOL_DISABLE;
+			h += strlen(STAT_API_CMD_POOL_DISABLE);
+			if (*h != '/') {
+				si->applet.ctx.stats.api_action = STAT_API_CMD_NOOP;
+				return 1;
+			}
+			h++;
+			int paramlength = get_api_parameter_length( h, true );
+			char *param = malloc( paramlength + 1 );
+			memcpy( param, h, paramlength );
+			*(param + paramlength) = '\0';
+			si->applet.ctx.stats.api_data = param;
+			return 1;
+		}
+		if (memcmp(h, STAT_API_CMD_POOL_STATUS, strlen(STAT_API_CMD_POOL_STATUS)) == 0) {
+			si->applet.ctx.stats.api_action = STAT_API_CMD_POOL_STATUS;
+			h += strlen(STAT_API_CMD_POOL_STATUS);
+			if (*h != '/') {
+				si->applet.ctx.stats.api_action = STAT_API_CMD_NOOP;
+				return 1;
+			}
+			h++;
+			int paramlength = get_api_parameter_length( h, true );
+			char *param = malloc( paramlength + 1 );
+			memcpy( param, h, paramlength );
+			*(param + paramlength) = '\0';
+			si->applet.ctx.stats.api_data = param;
+			return 1;
+		}
+		if (memcmp(h, STAT_API_CMD_POOL_CONTENTS, strlen(STAT_API_CMD_POOL_CONTENTS)) == 0) {
+			si->applet.ctx.stats.api_action = STAT_API_CMD_POOL_CONTENTS;
+			h += strlen(STAT_API_CMD_POOL_CONTENTS);
+			if (*h != '/') {
+				si->applet.ctx.stats.api_action = STAT_API_CMD_NOOP;
+				return 1;
+			}
+			h++;
+			int paramlength = get_api_parameter_length( h, false );
+			char *param = malloc( paramlength + 1 );
+			memcpy( param, h, paramlength );
+			*(param + paramlength) = '\0';
+			si->applet.ctx.stats.api_data = param;
+			return 1;
+		}
+		if (memcmp(h, STAT_API_CMD_POOL_ADD, strlen(STAT_API_CMD_POOL_ADD)) == 0) {
+			si->applet.ctx.stats.api_action = STAT_API_CMD_POOL_ADD;
+			h += strlen(STAT_API_CMD_POOL_ADD);
+			if (*h != '/') {
+				si->applet.ctx.stats.api_action = STAT_API_CMD_NOOP;
+				return 1;
+			}
+			h++;
+			int paramlength = get_api_parameter_length( h, false );
+			char *param = malloc( paramlength + 1 );
+			memcpy( param, h, paramlength );
+			*(param + paramlength) = '\0';
+			si->applet.ctx.stats.api_data = param;
+			return 1;
+		}
+		if (memcmp(h, STAT_API_CMD_POOL_REMOVE, strlen(STAT_API_CMD_POOL_REMOVE)) == 0) {
+			si->applet.ctx.stats.api_action = STAT_API_CMD_POOL_REMOVE;
+			h += strlen(STAT_API_CMD_POOL_REMOVE);
+			if (*h != '/') {
+				si->applet.ctx.stats.api_action = STAT_API_CMD_NOOP;
+				return 1;
+			}
+			h++;
+			int paramlength = get_api_parameter_length( h, true );
+			char *param = malloc( paramlength + 1 );
+			memcpy( param, h, paramlength );
+			*(param + paramlength) = '\0';
+			si->applet.ctx.stats.api_data = param;
+			return 1;
+		}
+		if (memcmp(h, STAT_API_CMD_POOL_WEIGHT, strlen(STAT_API_CMD_POOL_WEIGHT)) == 0) {
+			si->applet.ctx.stats.api_action = STAT_API_CMD_POOL_WEIGHT;
+			h += strlen(STAT_API_CMD_POOL_WEIGHT);
+			if (*h != '/') {
+				si->applet.ctx.stats.api_action = STAT_API_CMD_NOOP;
+				return 1;
+			}
+			h++;
+			int paramlength = get_api_parameter_length( h, true );
+			char *param = malloc( paramlength + 1 );
+			memcpy( param, h, paramlength );
+			*(param + paramlength) = '\0';
+			si->applet.ctx.stats.api_data = param;
+			return 1;
+		}
+
+		/* Fall through */
+		si->applet.ctx.stats.api_action = STAT_API_CMD_NOOP;
+		return 1;
+	}
+#endif /* USE_API */
+
 	while (h <= txn->req.sol + txn->req.sl.rq.u + txn->req.sl.rq.u_l - 3) {
 		if (memcmp(h, ";up", 3) == 0) {
 			si->applet.ctx.stats.flags |= STAT_HIDE_DOWN;
@@ -7403,6 +7562,17 @@ int stats_check_uri(struct stream_interface *si, struct http_txn *txn, struct pr
 
 	return 1;
 }
+
+#ifdef USE_API
+int get_api_parameter_length(char *p, bool allowslashes)
+{
+	int l = 1;
+	while ( *(p + l) != ' ' && ( *(p + l) != '/' || allowslashes) ) {
+		l++;
+	}
+	return l;
+}
+#endif /* USE_API */
 
 /*
  * Capture a bad request or response and archive it in the proxy's structure.

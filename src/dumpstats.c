@@ -65,6 +65,15 @@ static int stats_table_request(struct stream_interface *si, bool show);
 static int stats_dump_proxy(struct stream_interface *si, struct proxy *px, struct uri_auth *uri);
 static int stats_dump_http(struct stream_interface *si, struct uri_auth *uri);
 
+#ifdef USE_API
+#include <eb32tree.h>
+#include <json.h>
+#include <urldecode.h>
+
+static int api_call(struct stream_interface *si, struct chunk *msg);
+static int get_proxy(const char *bk_name, struct proxy **bk);
+#endif /* USE_API */
+
 static struct si_applet cli_applet;
 
 static const char stats_sock_usage_msg[] =
@@ -315,6 +324,542 @@ static int stats_parse_global(char **args, int section_type, struct proxy *curpx
 	}
 	return 0;
 }
+
+#ifdef USE_API
+static int get_proxy(const char *bk_name, struct proxy **bk)
+{
+        struct proxy *p;
+        int pid;
+
+        pid = 0;
+        if (*bk_name == '#')
+                pid = atoi(bk_name + 1);
+
+        for (p = proxy; p; p = p->next)
+                if ((p->cap & PR_CAP_BE) &&
+                    ((pid && p->uuid == pid) ||
+                     (!pid && strcmp(p->id, bk_name) == 0)))
+                        break;
+        if (bk)
+                *bk = p;
+        if (!p)
+                return 0;
+
+        return 1;
+}
+
+static int get_next_puid(struct proxy *px)
+{
+	struct server *s;
+	int max_puid = 0;
+	if (!px) return -1;
+	for (s = px->srv; s; s = s->next) {
+		if (s) {
+			if (s->puid > max_puid) max_puid = s->puid;
+		}
+	}
+	return ++max_puid;
+}
+
+bool param_json_bool_get_with_default(struct json_object* obj, char *key, bool default_value)
+{
+	if (!json_object_object_get(obj, key)) {
+		return default_value;
+	} else {
+		return json_object_get_boolean(json_object_object_get(obj, key));
+	}
+}
+
+int param_json_int_get_with_default(struct json_object* obj, char *key, int default_value)
+{
+	if (!json_object_object_get(obj, key)) {
+		return default_value;
+	} else {
+		return json_object_get_int(json_object_object_get(obj, key));
+	}
+}
+
+char *json_return_status(bool success, int status, char *reason)
+{
+	json_object *obj = json_object_new_object();
+	json_object_object_add(obj, "success", json_object_new_boolean(success));
+	json_object_object_add(obj, "status", json_object_new_string(success ? "OK" : "FAIL"));
+	json_object_object_add(obj, "status_code", json_object_new_int(status));
+	if (reason) json_object_object_add(obj, "reason", json_object_new_string(reason));
+	return strdup(json_object_to_json_string(obj));
+}
+
+/* Define return codes */
+#define STAT_API_RETURN_OK		json_return_status(true, 0, NULL)
+#define STAT_API_RETURN_SERVERNOTFOUND	json_return_status(false, 1, "SERVERNOTFOUND")
+#define STAT_API_RETURN_SERVERNOTGIVEN	json_return_status(false, 1, "SERVERNOTGIVEN")
+#define STAT_API_RETURN_PROXYNOTGIVEN	json_return_status(false, 1, "PROXYNOTGIVEN")
+#define STAT_API_RETURN_PROXYNOTFOUND	json_return_status(false, 1, "PROXYNOTFOUND")
+#define STAT_API_RETURN_DUPLICATENAME	json_return_status(false, 1, "DUPLICATENAME")
+#define STAT_API_RETURN_OOM		json_return_status(false, 1, "OUTOFMEMORY")
+
+static int api_call(struct stream_interface *si, struct chunk *msg)
+{
+	if (memcmp(si->applet.ctx.stats.api_action, STAT_API_CMD_VERSION, strlen(STAT_API_CMD_VERSION)) == 0) {
+		/* version */
+		return chunk_printf(msg, API_VERSION);
+	}
+	if (memcmp(si->applet.ctx.stats.api_action, STAT_API_CMD_POOL_ENABLE, strlen(STAT_API_CMD_POOL_ENABLE)) == 0) {
+		/* pool.enable */
+
+		struct proxy *px;
+		struct server *sv;
+
+		char *slash = strchr(si->applet.ctx.stats.api_data, '/');
+		if (!slash) {
+			return chunk_printf(msg, STAT_API_RETURN_SERVERNOTGIVEN);
+		}
+
+		int slash_pos = slash - si->applet.ctx.stats.api_data;
+
+		char *proxy_name = malloc(slash_pos + 1);
+		char *server_name = malloc(strlen(si->applet.ctx.stats.api_data) - slash_pos);
+		strncpy(proxy_name, si->applet.ctx.stats.api_data, slash_pos);
+		strncpy(server_name, si->applet.ctx.stats.api_data + slash_pos + 1, strlen(si->applet.ctx.stats.api_data) - slash_pos + 1);
+
+		if (!get_backend_server(proxy_name, server_name, &px, &sv)) {
+			return chunk_printf(msg, STAT_API_RETURN_SERVERNOTFOUND);
+		}
+
+		if (sv->state & SRV_MAINTAIN) {
+			if (sv->tracked) {
+				if (sv->tracked->state & SRV_RUNNING) {
+					set_server_up(sv);
+					sv->health = sv->rise;
+				} else {
+					sv->state &= ~SRV_MAINTAIN;
+					set_server_down(sv);
+				}
+			} else {
+				set_server_up(sv);
+				sv->health = sv->rise;
+			}
+		} else {
+			return chunk_printf(msg, STAT_API_RETURN_OK);
+		}
+
+		return chunk_printf(msg, STAT_API_RETURN_OK);
+	}
+	if (memcmp(si->applet.ctx.stats.api_action, STAT_API_CMD_POOL_DISABLE, strlen(STAT_API_CMD_POOL_DISABLE)) == 0) {
+		/* pool.disable */
+
+		struct proxy *px;
+		struct server *sv;
+
+		char *slash = strchr(si->applet.ctx.stats.api_data, '/');
+		if (!slash) {
+			return chunk_printf(msg, STAT_API_RETURN_SERVERNOTGIVEN);
+		}
+
+		int slash_pos = slash - si->applet.ctx.stats.api_data;
+
+		char *proxy_name = malloc(slash_pos + 1);
+		char *server_name = malloc(strlen(si->applet.ctx.stats.api_data) - slash_pos);
+		strncpy(proxy_name, si->applet.ctx.stats.api_data, slash_pos);
+		strncpy(server_name, si->applet.ctx.stats.api_data + slash_pos + 1, strlen(si->applet.ctx.stats.api_data) - slash_pos + 1);
+
+		if (!get_backend_server(proxy_name, server_name, &px, &sv)) {
+			return chunk_printf(msg, STAT_API_RETURN_SERVERNOTFOUND);
+		}
+
+
+		if (! (sv->state & SRV_MAINTAIN)) {
+			sv->state |= SRV_MAINTAIN;
+			set_server_down(sv);
+		}
+
+		return chunk_printf(msg, STAT_API_RETURN_OK);
+	}
+	if (memcmp(si->applet.ctx.stats.api_action, STAT_API_CMD_POOL_STATUS, strlen(STAT_API_CMD_POOL_STATUS)) == 0) {
+		/* pool.status */
+
+		struct proxy *px;
+		struct server *sv;
+
+		char *slash = strchr(si->applet.ctx.stats.api_data, '/');
+		if (!slash) {
+			return chunk_printf(msg, STAT_API_RETURN_SERVERNOTGIVEN);
+		}
+
+		int slash_pos = slash - si->applet.ctx.stats.api_data;
+
+		char *proxy_name = malloc(slash_pos + 1);
+		char *server_name = malloc(strlen(si->applet.ctx.stats.api_data) - slash_pos);
+		strncpy(proxy_name, si->applet.ctx.stats.api_data, slash_pos);
+		strncpy(server_name, si->applet.ctx.stats.api_data + slash_pos + 1, strlen(si->applet.ctx.stats.api_data) - slash_pos + 1);
+
+		if (!get_backend_server(proxy_name, server_name, &px, &sv)) {
+			return chunk_printf(msg, STAT_API_RETURN_SERVERNOTFOUND);
+		}
+
+		json_object *out = json_object_new_object();
+		json_object_object_add(out, "maintenance", json_object_new_boolean(sv->state & SRV_MAINTAIN));
+		json_object_object_add(out, "up", json_object_new_boolean(sv->state & SRV_RUNNING));
+		json_object_object_add(out, "backup", json_object_new_boolean(sv->state & SRV_BACKUP));
+		return chunk_printf(msg, json_object_to_json_string(out));
+	}
+	if (memcmp(si->applet.ctx.stats.api_action, STAT_API_CMD_POOL_CONTENTS, strlen(STAT_API_CMD_POOL_CONTENTS)) == 0) {
+		/* pool.contents */
+
+		struct proxy *px;
+		struct server *s;
+
+		if (!si->applet.ctx.stats.api_data || strlen(si->applet.ctx.stats.api_data) < 1) {
+			return chunk_printf(msg, STAT_API_RETURN_PROXYNOTGIVEN);
+		}
+
+		char *proxy_name = si->applet.ctx.stats.api_data;
+
+		if (!get_proxy(proxy_name, &px)) {
+			return chunk_printf(msg, STAT_API_RETURN_PROXYNOTFOUND);
+		}
+
+		json_object *out_array = json_object_new_array();
+
+		for (s = px->srv; s; s = s->next) {
+			json_object *obj_server = json_object_new_object();
+			json_object_object_add(obj_server, "proxy", json_object_new_string(px->id));
+			json_object_object_add(obj_server, "server", json_object_new_string(s->id));
+			json_object_object_add(obj_server, "state", json_object_new_int(s->state));
+
+			json_object *obj_status = json_object_new_object();
+			json_object_object_add(obj_status, "maintenance", json_object_new_boolean(s->state & SRV_MAINTAIN));
+			json_object_object_add(obj_status, "up", json_object_new_boolean(s->state & SRV_RUNNING));
+			json_object_object_add(obj_status, "backup", json_object_new_boolean(s->state & SRV_BACKUP));
+			json_object_object_add(obj_server, "status", obj_status);
+
+			json_object *obj_stats = json_object_new_object();
+			json_object_object_add(obj_stats, "minconn", json_object_new_int(s->minconn));
+			json_object_object_add(obj_stats, "maxconn", json_object_new_int(s->maxconn));
+			json_object_object_add(obj_stats, "served", json_object_new_int(s->served));
+			json_object_object_add(obj_stats, "cur_sess", json_object_new_int(s->cur_sess));
+			json_object_object_add(obj_stats, "nbpend", json_object_new_int(s->nbpend));
+			json_object_object_add(obj_stats, "maxqueue", json_object_new_int(s->maxqueue));
+			json_object_object_add(obj_stats, "consecutive_errors", json_object_new_int(s->consecutive_errors));
+			json_object_object_add(obj_stats, "rise", json_object_new_int(s->rise));
+			json_object_object_add(obj_stats, "fall", json_object_new_int(s->fall));
+			json_object_object_add(obj_stats, "down_time", json_object_new_int((int) s->down_time));
+			json_object_object_add(obj_stats, "puid", json_object_new_int(s->puid));
+
+			json_object *obj_counters = json_object_new_object();
+			json_object_object_add(obj_counters, "cur_sess_max", json_object_new_int(s->counters.cur_sess_max));
+			json_object_object_add(obj_counters, "nbpend_max", json_object_new_int(s->counters.nbpend_max));
+			json_object_object_add(obj_counters, "sps_max", json_object_new_int(s->counters.sps_max));
+			json_object_object_add(obj_counters, "cum_sess", json_object_new_int(s->counters.cum_sess));
+			json_object_object_add(obj_counters, "cum_lbconn", json_object_new_int(s->counters.cum_lbconn));
+			json_object_object_add(obj_counters, "bytes_in", json_object_new_int(s->counters.bytes_in));
+			json_object_object_add(obj_counters, "bytes_out", json_object_new_int(s->counters.bytes_out));
+			json_object_object_add(obj_counters, "failed_conns", json_object_new_int(s->counters.failed_conns));
+			json_object_object_add(obj_counters, "failed_resp", json_object_new_int(s->counters.failed_resp));
+			json_object_object_add(obj_counters, "cli_aborts", json_object_new_int(s->counters.cli_aborts));
+			json_object_object_add(obj_counters, "srv_aborts", json_object_new_int(s->counters.srv_aborts));
+			json_object_object_add(obj_counters, "retries", json_object_new_int(s->counters.retries));
+			json_object_object_add(obj_counters, "redispatches", json_object_new_int(s->counters.redispatches));
+			json_object_object_add(obj_counters, "failed_secu", json_object_new_int(s->counters.failed_secu));
+			json_object_object_add(obj_counters, "failed_checks", json_object_new_int(s->counters.failed_checks));
+			json_object_object_add(obj_counters, "failed_hana", json_object_new_int(s->counters.failed_hana));
+			json_object_object_add(obj_counters, "down_trans", json_object_new_int(s->counters.down_trans));
+			json_object_object_add(obj_stats, "counters", obj_counters);
+
+			json_object_object_add(obj_server, "stats", obj_stats);
+
+			json_object_array_add(out_array, obj_server);
+		}
+
+		return chunk_printf(msg, json_object_to_json_string(out_array));
+	}
+	if (memcmp(si->applet.ctx.stats.api_action, STAT_API_CMD_POOL_ADD, strlen(STAT_API_CMD_POOL_ADD)) == 0) {
+		/* pool.add */
+
+		struct proxy *px;
+		struct server *s = NULL;
+
+		/* Decode urlencoded data */
+		char *decoded = malloc(strlen(si->applet.ctx.stats.api_data) + 1);
+		urldecode(decoded, strlen(si->applet.ctx.stats.api_data) + 1, si->applet.ctx.stats.api_data);
+
+		struct json_object *new_obj = json_tokener_parse(decoded);
+		char *proxy_name = strdup(json_object_get_string(json_object_object_get(new_obj, "proxy")));
+
+		if (!proxy_name || strlen(proxy_name) < 1) {
+			if (new_obj) free(new_obj);
+			return chunk_printf(msg, STAT_API_RETURN_PROXYNOTGIVEN);
+		}
+
+		if (!get_proxy(proxy_name, &px)) {
+			if (new_obj) free(new_obj);
+			return chunk_printf(msg, STAT_API_RETURN_PROXYNOTFOUND);
+		}
+
+
+		/* allocate memory for server */
+		if ((s = (struct server *)calloc(1, sizeof(struct server))) == NULL) {
+			printf("out of memory.\n");
+			if (new_obj) free(new_obj);
+			return chunk_printf(msg, STAT_API_RETURN_OOM);
+		}
+
+		s->id = strdup(json_object_get_string(json_object_object_get(new_obj, "server")));
+
+		if (findserver(px, s->id) != NULL) {
+			printf("found duplicate server with that name.\n");
+			if (new_obj) free(new_obj);
+			return chunk_printf(msg, STAT_API_RETURN_DUPLICATENAME);
+		}
+
+		/* the servers are linked backwards first */
+		s->next = px->srv;
+		px->srv = s;
+		s->proxy = px;
+		s->conf.file = strdup("dynamic");
+		s->conf.line = 0;
+		LIST_INIT(&s->actconns);
+		LIST_INIT(&s->pendconns);
+		s->state = SRV_RUNNING | SRV_CHECKED;
+		px->last_change = now.tv_sec;
+		s->last_change = now.tv_sec;
+
+		char *raddr = strdup(json_object_get_string(json_object_object_get(new_obj, "addr")));
+		struct sockaddr_storage *sk = str2ip(raddr);
+		s->addr = *sk;
+		free(raddr);
+
+		bool check = param_json_bool_get_with_default(new_obj, "check", false);
+
+		int realport = 0;
+		if (json_object_object_get(new_obj, "port") == 0) {
+			s->state |= SRV_MAPPORTS;
+		} else {
+			realport = json_object_get_int(json_object_object_get(new_obj, "port"));
+		}
+		switch (s->addr.ss_family) {
+			case AF_INET6:
+				((struct sockaddr_in6 *)&s->addr)->sin6_port = htons(realport);
+				break;
+			case AF_INET:
+			default:
+				((struct sockaddr_in *)&s->addr)->sin_port = htons(realport);
+				break;
+		}
+
+		s->check_port = param_json_int_get_with_default(new_obj, "check_port", px->defsrv.check_port);
+		s->inter = param_json_int_get_with_default(new_obj, "inter", px->defsrv.inter);
+		s->fastinter       = px->defsrv.fastinter;
+		s->downinter       = px->defsrv.downinter;
+		s->rise = param_json_int_get_with_default(new_obj, "rise", px->defsrv.rise);
+		s->fall = param_json_int_get_with_default(new_obj, "fall", px->defsrv.rise);
+		s->maxqueue        = px->defsrv.maxqueue;
+		s->minconn         = px->defsrv.minconn;
+		s->maxconn         = px->defsrv.maxconn;
+		s->slowstart       = px->defsrv.slowstart;
+		s->onerror         = px->defsrv.onerror;
+		s->consecutive_errors_limit = px->defsrv.consecutive_errors_limit;
+		if (!json_object_object_get(new_obj, "weight")) {
+			s->state |= SRV_MAPPORTS;
+			s->uweight = s->iweight = px->defsrv.iweight;
+		} else {
+			s->uweight = s->iweight = json_object_get_int(json_object_object_get(new_obj, "weight"));
+		}
+		s->curfd = -1; /* no health-check in progress */
+		s->health = s->rise; /* up, but will fall down at first failure */
+		s->puid = get_next_puid(px);
+		s->conf.id.key = s->puid;
+
+		if (json_object_get_boolean(json_object_object_get(new_obj, "disabled"))) {
+			s->state |= SRV_MAINTAIN;
+			s->state &= ~SRV_RUNNING;
+			s->health = 0;
+		}
+
+		if (s->state & SRV_BACKUP) {
+			px->srv_bck++;
+		} else {
+			px->srv_act++;
+		}
+		s->prev_state = s->state;
+
+		if (check) {
+			/* Allocate buffer for partial check results... */
+			if ((s->check_data = calloc(global.tune.chksize, sizeof(char))) == NULL) {
+				printf("out of memory.\n");
+				if (new_obj) free(new_obj);
+				return chunk_printf(msg, STAT_API_RETURN_OOM);
+			}
+			set_server_check_status(s, HCHK_STATUS_START, trash);
+		}
+
+		if (new_obj) free(new_obj);
+
+		if (!(s->state & SRV_MAINTAIN)) set_server_up(s);
+		add_server_check(px, s); /* add check task */
+
+		return chunk_printf(msg, STAT_API_RETURN_OK);
+	}
+	if (memcmp(si->applet.ctx.stats.api_action, STAT_API_CMD_POOL_WEIGHT, strlen(STAT_API_CMD_POOL_WEIGHT)) == 0) {
+		/* pool.weight */
+
+		struct proxy *px;
+		struct server *sv;
+
+		char *orig = strdup(si->applet.ctx.stats.api_data);
+		char *p, *server_name, *proxy_name, *weight_raw;
+		
+		server_name = malloc(strlen(orig));
+		proxy_name = malloc(strlen(orig));
+		weight_raw = malloc(strlen(orig));
+
+		p = strtok(orig, "/");
+		int count = 0;
+		while (p) {
+			switch (count) {
+				case 0:
+					proxy_name = strdup(p);
+					break;
+				case 1:
+					server_name = strdup(p);
+					break;
+				case 2:
+					weight_raw = strdup(p);
+					break;
+			}
+			p = strtok(NULL, "/");
+			count++;
+		}
+
+		if (!get_backend_server(proxy_name, server_name, &px, &sv)) {
+			if (server_name) free(server_name);
+			if (proxy_name) free(proxy_name);
+			if (weight_raw) free(weight_raw);
+			if (orig) free(orig);
+			return chunk_printf(msg, STAT_API_RETURN_SERVERNOTFOUND);
+		}
+
+		if (!weight_raw) {
+			if (server_name) free(server_name);
+			if (proxy_name) free(proxy_name);
+			if (weight_raw) free(weight_raw);
+			if (orig) free(orig);
+			return chunk_printf(msg, STAT_API_RETURN_SERVERNOTFOUND);
+		}
+
+		sv->iweight = sv->uweight = atoi(weight_raw);
+		int w = atoi(weight_raw);
+		if (strchr(weight_raw, '%') != NULL) {
+			if (w < 0 || w > 100) {
+				if (server_name) free(server_name);
+				if (proxy_name) free(proxy_name);
+				if (weight_raw) free(weight_raw);
+				if (orig) free(orig);
+				return chunk_printf(msg, json_return_status(false, 1, "Relative weight can only be set between 0 and 100% inclusive."));
+			}
+			w = sv->iweight * w / 100;
+		} else {
+			if (w < 0 || w > 256) {
+				if (server_name) free(server_name);
+				if (proxy_name) free(proxy_name);
+				if (weight_raw) free(weight_raw);
+				if (orig) free(orig);
+				return chunk_printf(msg, json_return_status(false, 1, "Absolute weight can only be between 0 and 256 inclusive."));
+			}
+		}
+
+		if (w && w != sv->iweight && !(px->lbprm.algo & BE_LB_PROP_DYN)) {
+			if (server_name) free(server_name);
+			if (proxy_name) free(proxy_name);
+			if (weight_raw) free(weight_raw);
+			if (orig) free(orig);
+			return chunk_printf(msg, json_return_status(false, 1, "Backend is using a static LB algorithm and only accepts weights '0%' and '100%'."));
+		}
+
+		sv->uweight = w;
+
+		if (px->lbprm.algo & BE_LB_PROP_DYN) {
+			if ((sv->state & SRV_WARMINGUP) && (px->lbprm.algo & BE_LB_PROP_DYN))
+				sv->eweight = (BE_WEIGHT_SCALE * (now.tv_sec - sv->last_change) + sv->slowstart - 1) / sv->slowstart;
+			else
+				sv->eweight = BE_WEIGHT_SCALE;
+			sv->eweight *= sv->uweight;
+		} else {
+			sv->eweight = sv->uweight;
+		}
+
+		if (server_name) free(server_name);
+		if (proxy_name) free(proxy_name);
+		if (weight_raw) free(weight_raw);
+		if (orig) free(orig);
+
+		return chunk_printf(msg, STAT_API_RETURN_OK);
+	}
+	if (memcmp(si->applet.ctx.stats.api_action, STAT_API_CMD_POOL_REMOVE, strlen(STAT_API_CMD_POOL_REMOVE)) == 0) {
+		/* pool.remove */
+
+		struct proxy *px;
+		struct server *sv;
+
+		char *slash = strchr(si->applet.ctx.stats.api_data, '/');
+		if (!slash) {
+			return chunk_printf(msg, STAT_API_RETURN_SERVERNOTGIVEN);
+		}
+
+		int slash_pos = slash - si->applet.ctx.stats.api_data;
+
+		char *proxy_name = malloc(slash_pos + 1);
+		char *server_name = malloc(strlen(si->applet.ctx.stats.api_data) - slash_pos);
+		strncpy(proxy_name, si->applet.ctx.stats.api_data, slash_pos);
+		strncpy(server_name, si->applet.ctx.stats.api_data + slash_pos + 1, strlen(si->applet.ctx.stats.api_data) - slash_pos + 1);
+
+		if (!get_backend_server(proxy_name, server_name, &px, &sv)) {
+			if (server_name) free(server_name);
+			if (proxy_name) free(proxy_name);
+			return chunk_printf(msg, STAT_API_RETURN_SERVERNOTFOUND);
+		}
+
+		/* First, set to maintenance mode while we work */
+		if (! (sv->state & SRV_MAINTAIN)) {
+			sv->state |= SRV_MAINTAIN;
+			set_server_down(sv);
+		}
+
+		/* Remove task from list */
+		/*
+		FIXME: Needs to be removed properly, currently segfaults.
+		eb32_delete(sv->check);
+                __task_unlink_rq(sv->check);
+		*/
+
+		/* Find the server pointing at this one and skip around it */
+		struct server *s2;
+		for (s2 = px->srv; s2; s2 = s2->next) {
+			if (s2->next == sv) {
+				s2->next = sv->next;
+				continue;
+			}
+		}
+
+		/* Free any allocated memory */
+		if (sv) free(sv);	
+		if (server_name) free(server_name);
+		if (proxy_name) free(proxy_name);
+
+		return chunk_printf(msg, STAT_API_RETURN_OK);
+	}
+	if (memcmp(si->applet.ctx.stats.api_action, STAT_API_CMD_POOL_GETSERVERS, strlen(STAT_API_CMD_POOL_GETSERVERS)) == 0) {
+		/* pool.getservers */
+		json_object *out = json_object_new_array();
+
+		/* TODO: FIXME: populate properly */
+
+		return chunk_printf(msg, json_object_to_json_string(out));
+	}
+	return chunk_printf(msg, STAT_API_RETURN_OK);
+}
+
+#endif /* USE_API */
 
 static int print_csv_header(struct chunk *msg)
 {
@@ -1571,7 +2116,11 @@ static int stats_dump_http(struct stream_interface *si, struct uri_auth *uri)
 			     "Cache-Control: no-cache\r\n"
 			     "Connection: close\r\n"
 			     "Content-Type: %s\r\n",
+#ifdef USE_API
+			     (si->applet.ctx.stats.flags & STAT_FMT_CSV || si->applet.ctx.stats.flags & STAT_API) ? "text/plain" : "text/html");
+#else
 			     (si->applet.ctx.stats.flags & STAT_FMT_CSV) ? "text/plain" : "text/html");
+#endif /* USE_API */
 
 		if (uri->refresh > 0 && !(si->applet.ctx.stats.flags & STAT_NO_REFRESH))
 			chunk_printf(&msg, "Refresh: %d\r\n",
@@ -1598,7 +2147,11 @@ static int stats_dump_http(struct stream_interface *si, struct uri_auth *uri)
 		/* fall through */
 
 	case STAT_ST_HEAD:
+#if USE_API
+		if (!(si->applet.ctx.stats.flags & STAT_FMT_CSV) && !(si->applet.ctx.stats.flags & STAT_API)) {
+#else
 		if (!(si->applet.ctx.stats.flags & STAT_FMT_CSV)) {
+#endif /* USE_API */
 			/* WARNING! This must fit in the first buffer !!! */
 			chunk_printf(&msg,
 			     "<!DOCTYPE HTML PUBLIC \"-//W3C//DTD HTML 4.01 Transitional//EN\"\n"
@@ -1693,7 +2246,20 @@ static int stats_dump_http(struct stream_interface *si, struct uri_auth *uri)
 			     (uri->flags&ST_SHNODE) ? (uri->node ? uri->node : global.node) : ""
 			     );
 		} else {
+#ifdef USE_API
+			if (si->applet.ctx.stats.flags & STAT_FMT_CSV) {
+				print_csv_header(&msg);
+
+			} else if (si->applet.ctx.stats.flags & STAT_API) {
+				api_call(si, &msg);
+				if (buffer_feed_chunk(rep, &msg) >= 0)
+					return 0;
+				si->applet.state = STAT_ST_FIN;
+				return 1;
+			}
+#else
 			print_csv_header(&msg);
+#endif /* USE_API */
 		}
 		if (buffer_feed_chunk(rep, &msg) >= 0)
 			return 0;

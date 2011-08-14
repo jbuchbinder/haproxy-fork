@@ -35,6 +35,10 @@
 #define STAT_NO_REFRESH 0x00000010	/* do not automatically refresh the stats page */
 #define STAT_ADMIN      0x00000020	/* indicate a stats admin level */
 #define STAT_BOUND      0x00800000	/* bound statistics to selected proxies/types/services */
+#ifdef USE_API
+#define STAT_API        0x10000000	/* stats call */
+#define API_VERSION	"0.0.1"
+#endif /* USE_API */
 
 #define STATS_TYPE_FE  0
 #define STATS_TYPE_BE  1
@@ -61,6 +65,20 @@
 #define STAT_STATUS_NONE "NONE"	/* nothing happened (no action chosen or servers state didn't change) */
 #define STAT_STATUS_EXCD "EXCD"	/* an error occured becayse the buffer couldn't store all data */
 #define STAT_STATUS_DENY "DENY"	/* action denied */
+
+#ifdef USE_API
+#define STAT_API_CMD_NOOP "noop"	/* no operation */
+#define STAT_API_CMD_VERSION "version"	/* request version */
+#define STAT_API_CMD_POOL_GETSERVERS "pool.getservers"	/* get list of servers in pool */
+#define STAT_API_CMD_POOL_ENABLE "pool.enable" /* enable single server */
+#define STAT_API_CMD_POOL_DISABLE "pool.disable" /* disable single server */
+#define STAT_API_CMD_POOL_STATUS "pool.status" /* single server status */
+#define STAT_API_CMD_POOL_CONTENTS "pool.contents" /* list of all servers */
+#define STAT_API_CMD_POOL_ADD "pool.add" /* add server */
+#define STAT_API_CMD_POOL_REMOVE "pool.remove" /* remove server */
+#define STAT_API_CMD_POOL_WEIGHT "pool.weight" /* set weight */
+
+#endif /* USE_API */
 
 extern struct si_applet http_stats_applet;
 
