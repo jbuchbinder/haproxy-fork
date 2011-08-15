@@ -100,8 +100,12 @@ VER_OPTS := -DCONFIG_HAPROXY_VERSION=\"$(VERSION)$(SUBVERS)\" \
 # This one can be changed to look for ebtree files in an external directory
 EBTREE_DIR := ebtree
 
+# This one can be changed to look for json-c files in an external directory
+JSON_C_DIR := json-c
+
 COPTS   = -Iinclude -I$(EBTREE_DIR) $(ADDINC) $(CPU_OPTS) $(TARGET_OPTS) \
-          $(SPEC_OPTS) $(REGEX_OPTS) $(SMALL_OPTS) $(VER_OPTS) $(DEFINE)
+          $(SPEC_OPTS) $(REGEX_OPTS) $(SMALL_OPTS) $(VER_OPTS) $(JSON_C_DIR) \
+          $(DEFINE)
 LIBS    = $(LIBS.$(TARGET)) $(LIBS.$(REGEX)) $(ADDLIB)
 CFLAGS  = -Wall $(COPTS) $(DEBUG)
 LDFLAGS = -g
@@ -123,9 +127,19 @@ EBTREE_OBJS = $(EBTREE_DIR)/ebtree.o \
               $(EBTREE_DIR)/ebmbtree.o $(EBTREE_DIR)/ebsttree.o \
               $(EBTREE_DIR)/ebimtree.o $(EBTREE_DIR)/ebistree.o
 
+JSON_C_OBJS = $(JSON_C_DIR)/arraylist.o \
+		$(JSON_C_DIR)/debug.o \
+		$(JSON_C_DIR)/json_object.o \
+		$(JSON_C_DIR)/json_tokener.o \
+		$(JSON_C_DIR)/json_util.o \
+		$(JSON_C_DIR)/linkhash.o \
+		$(JSON_C_DIR)/printbuf.o \
+		$(JSON_C_DIR)/urldecode.o
+
+# Not used right now
 all: haproxy
 
-haproxy: $(OBJS) $(OPT_OBJS) $(EBTREE_OBJS)
+haproxy: $(OBJS) $(OPT_OBJS) $(EBTREE_OBJS) $(JSON_C_OBJS)
 	$(LD) $(LDFLAGS) -o $@ $> $(LIBS)
 
 .SUFFIXES: .c.o
