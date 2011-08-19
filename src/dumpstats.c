@@ -423,6 +423,8 @@ static int api_call(struct stream_interface *si, struct chunk *msg)
 		strncpy(server_name, si->applet.ctx.stats.api_data + slash_pos + 1, strlen(si->applet.ctx.stats.api_data) - slash_pos + 1);
 
 		if (!get_backend_server(proxy_name, server_name, &px, &sv)) {
+			if (proxy_name) free(proxy_name);
+			if (server_name) free(server_name);
 			return chunk_printf(msg, STAT_API_RETURN_SERVERNOTFOUND);
 		}
 
@@ -440,9 +442,13 @@ static int api_call(struct stream_interface *si, struct chunk *msg)
 				sv->health = sv->rise;
 			}
 		} else {
+			if (proxy_name) free(proxy_name);
+			if (server_name) free(server_name);
 			return chunk_printf(msg, STAT_API_RETURN_OK);
 		}
 
+		if (proxy_name) free(proxy_name);
+		if (server_name) free(server_name);
 		return chunk_printf(msg, STAT_API_RETURN_OK);
 	}
 	if (memcmp(si->applet.ctx.stats.api_action, STAT_API_CMD_POOL_DISABLE, strlen(STAT_API_CMD_POOL_DISABLE)) == 0) {
@@ -464,6 +470,8 @@ static int api_call(struct stream_interface *si, struct chunk *msg)
 		strncpy(server_name, si->applet.ctx.stats.api_data + slash_pos + 1, strlen(si->applet.ctx.stats.api_data) - slash_pos + 1);
 
 		if (!get_backend_server(proxy_name, server_name, &px, &sv)) {
+			if (proxy_name) free(proxy_name);
+			if (server_name) free(server_name);
 			return chunk_printf(msg, STAT_API_RETURN_SERVERNOTFOUND);
 		}
 
@@ -473,6 +481,8 @@ static int api_call(struct stream_interface *si, struct chunk *msg)
 			set_server_down(sv);
 		}
 
+		if (proxy_name) free(proxy_name);
+		if (server_name) free(server_name);
 		return chunk_printf(msg, STAT_API_RETURN_OK);
 	}
 	if (memcmp(si->applet.ctx.stats.api_action, STAT_API_CMD_POOL_STATUS, strlen(STAT_API_CMD_POOL_STATUS)) == 0) {
@@ -494,6 +504,8 @@ static int api_call(struct stream_interface *si, struct chunk *msg)
 		strncpy(server_name, si->applet.ctx.stats.api_data + slash_pos + 1, strlen(si->applet.ctx.stats.api_data) - slash_pos + 1);
 
 		if (!get_backend_server(proxy_name, server_name, &px, &sv)) {
+			if (proxy_name) free(proxy_name);
+			if (server_name) free(server_name);
 			return chunk_printf(msg, STAT_API_RETURN_SERVERNOTFOUND);
 		}
 
@@ -501,6 +513,8 @@ static int api_call(struct stream_interface *si, struct chunk *msg)
 		json_object_object_add(out, "maintenance", json_object_new_boolean(sv->state & SRV_MAINTAIN));
 		json_object_object_add(out, "up", json_object_new_boolean(sv->state & SRV_RUNNING));
 		json_object_object_add(out, "backup", json_object_new_boolean(sv->state & SRV_BACKUP));
+		if (proxy_name) free(proxy_name);
+		if (server_name) free(server_name);
 		return chunk_printf(msg, json_object_to_json_string(out));
 	}
 	if (memcmp(si->applet.ctx.stats.api_action, STAT_API_CMD_POOL_CONTENTS, strlen(STAT_API_CMD_POOL_CONTENTS)) == 0) {
@@ -584,6 +598,7 @@ static int api_call(struct stream_interface *si, struct chunk *msg)
 		urldecode(decoded, strlen(si->applet.ctx.stats.api_data) + 1, si->applet.ctx.stats.api_data);
 
 		struct json_object *new_obj = json_tokener_parse(decoded);
+		if (decoded) free(decoded);
 		char *proxy_name = json_object_get_string(json_object_object_get(new_obj, "proxy"));
 
 		if (!proxy_name || strlen(proxy_name) < 1) {
@@ -842,7 +857,7 @@ static int api_call(struct stream_interface *si, struct chunk *msg)
 		}
 
 		/* Free any allocated memory */
-		if (sv) free(sv);	
+		/* if (sv) free(sv); */
 		if (server_name) free(server_name);
 		if (proxy_name) free(proxy_name);
 
