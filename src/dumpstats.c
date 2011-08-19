@@ -386,7 +386,7 @@ char *json_return_status(bool success, int status, char *reason)
 	json_object_object_add(obj, "status", json_object_new_string(success ? "OK" : "FAIL"));
 	json_object_object_add(obj, "status_code", json_object_new_int(status));
 	if (reason) json_object_object_add(obj, "reason", json_object_new_string(reason));
-	return strdup(json_object_to_json_string(obj));
+	return json_object_to_json_string(obj);
 }
 
 /* Define return codes */
@@ -584,7 +584,7 @@ static int api_call(struct stream_interface *si, struct chunk *msg)
 		urldecode(decoded, strlen(si->applet.ctx.stats.api_data) + 1, si->applet.ctx.stats.api_data);
 
 		struct json_object *new_obj = json_tokener_parse(decoded);
-		char *proxy_name = strdup(json_object_get_string(json_object_object_get(new_obj, "proxy")));
+		char *proxy_name = json_object_get_string(json_object_object_get(new_obj, "proxy"));
 
 		if (!proxy_name || strlen(proxy_name) < 1) {
 			if (new_obj) free(new_obj);
@@ -604,7 +604,7 @@ static int api_call(struct stream_interface *si, struct chunk *msg)
 			return chunk_printf(msg, STAT_API_RETURN_OOM);
 		}
 
-		s->id = strdup(json_object_get_string(json_object_object_get(new_obj, "server")));
+		s->id = json_object_get_string(json_object_object_get(new_obj, "server"));
 
 		if (findserver(px, s->id) != NULL) {
 			printf("found duplicate server with that name.\n");
@@ -616,7 +616,7 @@ static int api_call(struct stream_interface *si, struct chunk *msg)
 		s->next = px->srv;
 		px->srv = s;
 		s->proxy = px;
-		s->conf.file = strdup("dynamic");
+		s->conf.file = "dynamic";
 		s->conf.line = 0;
 		LIST_INIT(&s->actconns);
 		LIST_INIT(&s->pendconns);
@@ -624,7 +624,7 @@ static int api_call(struct stream_interface *si, struct chunk *msg)
 		px->last_change = now.tv_sec;
 		s->last_change = now.tv_sec;
 
-		char *raddr = strdup(json_object_get_string(json_object_object_get(new_obj, "addr")));
+		char *raddr = json_object_get_string(json_object_object_get(new_obj, "addr"));
 		struct sockaddr_storage *sk = str2ip(raddr);
 		s->addr = *sk;
 		free(raddr);
