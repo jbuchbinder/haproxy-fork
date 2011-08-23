@@ -7362,7 +7362,7 @@ int stats_check_uri(struct stream_interface *si, struct http_txn *txn, struct pr
          * Check to see if there are any calls to /api/ namespace, and
          * route accordingly.
          */
-	if (memcmp(h, "api/", 4) == 0) {
+	if (memcmp(h, API_URL_PREFIX, strlen(API_URL_PREFIX)) == 0) {
 		si->applet.ctx.stats.flags |= STAT_API;
 		
 		/*

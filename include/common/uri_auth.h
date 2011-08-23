@@ -45,6 +45,9 @@ struct uri_auth {
 	struct list http_req_rules;	/* stats http-request rules : allow/deny/auth */
 	struct list admin_rules;	/* 'stats admin' rules (chained) */
 	struct uri_auth *next;		/* Used at deinit() to build a list of unique elements */
+#ifdef USE_API
+	char *api_prefix;		/* the API prefix we want to match */
+#endif /* USE_API */
 };
 
 /* This is the default statistics URI */
@@ -77,6 +80,9 @@ struct stats_admin_rule {
  */
 struct uri_auth *stats_check_init_uri_auth(struct uri_auth **root);
 struct uri_auth *stats_set_uri(struct uri_auth **root, char *uri);
+#ifdef USE_API
+struct uri_auth *stats_set_api(struct uri_auth **root, char *api);
+#endif /* USE_API */
 struct uri_auth *stats_set_realm(struct uri_auth **root, char *realm);
 struct uri_auth *stats_set_refresh(struct uri_auth **root, int interval);
 struct uri_auth *stats_set_flag(struct uri_auth **root, int flag);

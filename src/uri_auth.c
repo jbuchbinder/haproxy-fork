@@ -82,6 +82,33 @@ struct uri_auth *stats_set_uri(struct uri_auth **root, char *uri)
 	return NULL;
 }
 
+#ifdef USE_API
+/*
+ * Returns a default uri_auth with <uri> set as the uri_prefix.
+ * Uses the pointer provided if not NULL and not initialized.
+ */
+struct uri_auth *stats_set_api(struct uri_auth **root, char *api)
+{
+	struct uri_auth *u;
+	char *api_copy;
+
+	if ((api_copy = strdup(api)) == NULL)
+		goto out_api;
+	
+	if ((u = stats_check_init_uri_auth(root)) == NULL)
+		goto out_u;
+	
+	free(u->api_prefix);
+	u->api_prefix = api_copy;
+	return u;
+
+ out_u:
+	free(api_copy);
+ out_api:
+	return NULL;
+}
+#endif /* USE_API */
+
 /*
  * Returns a default uri_auth with <realm> set as the realm.
  * Uses the pointer provided if not NULL and not initialized.

@@ -36,6 +36,7 @@
 #define STAT_ADMIN      0x00000020	/* indicate a stats admin level */
 #define STAT_BOUND      0x00800000	/* bound statistics to selected proxies/types/services */
 #ifdef USE_API
+#define API_URL_PREFIX	"api/"		/* what is prefixed to API requests */
 #define STAT_API        0x10000000	/* stats call */
 #define API_VERSION	"0.0.1"
 #endif /* USE_API */

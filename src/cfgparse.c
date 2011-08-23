@@ -2985,6 +2985,18 @@ int cfg_parse_listen(const char *file, int linenum, char **args, int kwm)
 				err_code |= ERR_ALERT | ERR_ABORT;
 				goto out;
 			}
+#ifdef USE_API
+		} else if (!strcmp(args[1], "api")) {
+			if (*(args[2]) == 0) {
+				Alert("parsing [%s:%d] : 'api' needs an URI prefix.\n", file, linenum);
+				err_code |= ERR_ALERT | ERR_FATAL;
+				goto out;
+			} else if (!stats_set_api(&curproxy->uri_auth, args[2])) {
+				Alert("parsing [%s:%d] : out of memory.\n", file, linenum);
+				err_code |= ERR_ALERT | ERR_ABORT;
+				goto out;
+			}
+#endif /* USE_API */
 		} else if (!strcmp(args[1], "realm")) {
 			if (*(args[2]) == 0) {
 				Alert("parsing [%s:%d] : 'realm' needs an realm name.\n", file, linenum);
