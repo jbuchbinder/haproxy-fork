@@ -1425,6 +1425,15 @@ int cfg_parse_listen(const char *file, int linenum, char **args, int kwm)
 			}
 			curproxy->check_len = defproxy.check_len;
 
+			if (defproxy.expect_str) {
+				curproxy->expect_str = strdup(defproxy.expect_str);
+				if (defproxy.expect_regex) {
+					/* note: this regex is known to be valid */
+					curproxy->expect_regex = calloc(1, sizeof(regex_t));
+					regcomp(curproxy->expect_regex, defproxy.expect_str, REG_EXTENDED);
+				}
+			}
+
 			if (defproxy.cookie_name)
 				curproxy->cookie_name = strdup(defproxy.cookie_name);
 			curproxy->cookie_len = defproxy.cookie_len;
@@ -1522,6 +1531,8 @@ int cfg_parse_listen(const char *file, int linenum, char **args, int kwm)
 		defproxy.fwdfor_hdr_len = 0;
 		free(defproxy.orgto_hdr_name);
 		defproxy.orgto_hdr_len = 0;
+		free(defproxy.expect_str);
+		if (defproxy.expect_regex) regfree(defproxy.expect_regex);
 
 		for (rc = 0; rc < HTTP_ERR_SIZE; rc++)
 			chunk_destroy(&defproxy.errmsg[rc]);
@@ -3485,7 +3496,7 @@ stats_error_parsing:
 			 * set default options (ie: bitfield, header name, etc) 
 			 */
 
-			curproxy->options |= PR_O_FWDFOR;
+			curproxy->options |= PR_O_FWDFOR | PR_O_FF_ALWAYS;
 
 			free(curproxy->fwdfor_hdr_name);
 			curproxy->fwdfor_hdr_name = strdup(DEF_XFORWARDFOR_HDR);
@@ -3517,9 +3528,12 @@ stats_error_parsing:
 					curproxy->fwdfor_hdr_name = strdup(args[cur_arg+1]);
 					curproxy->fwdfor_hdr_len  = strlen(curproxy->fwdfor_hdr_name);
 					cur_arg += 2;
+				} else if (!strcmp(args[cur_arg], "if-none")) {
+					curproxy->options &= ~PR_O_FF_ALWAYS;
+					cur_arg += 1;
 				} else {
 					/* unknown suboption - catchall */
-					Alert("parsing [%s:%d] : '%s %s' only supports optional values: 'except' and 'header'.\n",
+					Alert("parsing [%s:%d] : '%s %s' only supports optional values: 'except', 'header' and 'if-none'.\n",
 					      file, linenum, args[0], args[1]);
 					err_code |= ERR_ALERT | ERR_FATAL;
 					goto out;
@@ -3539,7 +3553,7 @@ stats_error_parsing:
 			curproxy->orgto_hdr_name = strdup(DEF_XORIGINALTO_HDR);
 			curproxy->orgto_hdr_len  = strlen(DEF_XORIGINALTO_HDR);
 
-			/* loop to go through arguments - start at 2, since 0+1 = "option" "forwardfor" */
+			/* loop to go through arguments - start at 2, since 0+1 = "option" "originalto" */
 			cur_arg = 2;
 			while (*(args[cur_arg])) {
 				if (!strcmp(args[cur_arg], "except")) {
@@ -3647,6 +3661,7 @@ stats_error_parsing:
 					goto out;
 				}
 				curproxy->options2 |= PR_O2_EXP_STS;
+				free(curproxy->expect_str);
 				curproxy->expect_str = strdup(args[cur_arg + 1]);
 			}
 			else if (strcmp(ptr_arg, "string") == 0) {
@@ -3657,6 +3672,7 @@ stats_error_parsing:
 					goto out;
 				}
 				curproxy->options2 |= PR_O2_EXP_STR;
+				free(curproxy->expect_str);
 				curproxy->expect_str = strdup(args[cur_arg + 1]);
 			}
 			else if (strcmp(ptr_arg, "rstatus") == 0) {
@@ -3667,6 +3683,9 @@ stats_error_parsing:
 					goto out;
 				}
 				curproxy->options2 |= PR_O2_EXP_RSTS;
+				free(curproxy->expect_str);
+				if (curproxy->expect_regex) regfree(curproxy->expect_regex);
+				curproxy->expect_str = strdup(args[cur_arg + 1]);
 				curproxy->expect_regex = calloc(1, sizeof(regex_t));
 				if (regcomp(curproxy->expect_regex, args[cur_arg + 1], REG_EXTENDED) != 0) {
 					Alert("parsing [%s:%d] : '%s %s %s' : bad regular expression '%s'.\n",
@@ -3683,6 +3702,9 @@ stats_error_parsing:
 					goto out;
 				}
 				curproxy->options2 |= PR_O2_EXP_RSTR;
+				free(curproxy->expect_str);
+				if (curproxy->expect_regex) regfree(curproxy->expect_regex);
+				curproxy->expect_str = strdup(args[cur_arg + 1]);
 				curproxy->expect_regex = calloc(1, sizeof(regex_t));
 				if (regcomp(curproxy->expect_regex, args[cur_arg + 1], REG_EXTENDED) != 0) {
 					Alert("parsing [%s:%d] : '%s %s %s' : bad regular expression '%s'.\n",
@@ -3699,7 +3721,7 @@ stats_error_parsing:
 			}
 		}
 		else {
-			Alert("parsing [%s:%d] : '%s' only supports 'disable-on-404', 'expect' .\n", file, linenum, args[0]);
+			Alert("parsing [%s:%d] : '%s' only supports 'disable-on-404', 'send-state', 'expect'.\n", file, linenum, args[0]);
 			err_code |= ERR_ALERT | ERR_FATAL;
 			goto out;
 		}
@@ -6082,11 +6104,11 @@ out_uri_auth_compat:
 				curproxy->uri_auth = NULL;
 			}
 
-			if (curproxy->options & PR_O_FWDFOR) {
+			if (curproxy->options & (PR_O_FWDFOR | PR_O_FF_ALWAYS)) {
 				Warning("config : 'option %s' ignored for %s '%s' as it requires HTTP mode.\n",
 					"forwardfor", proxy_type_str(curproxy), curproxy->id);
 				err_code |= ERR_WARN;
-				curproxy->options &= ~PR_O_FWDFOR;
+				curproxy->options &= ~(PR_O_FWDFOR | PR_O_FF_ALWAYS);
 			}
 
 			if (curproxy->options & PR_O_ORGTO) {
