@@ -1284,16 +1284,8 @@ struct task *process_chk(struct task *t)
 					/* we'll connect to the addr on the server */
 					sa = s->addr;
 
-				switch (s->check_addr.ss_family) {
-				case AF_INET:
-					/* we'll connect to the check port on the server */
-					((struct sockaddr_in *)&sa)->sin_port = htons(s->check_port);
-					break;
-				case AF_INET6:
-					/* we'll connect to the check port on the server */
-					((struct sockaddr_in6 *)&sa)->sin6_port = htons(s->check_port);
-					break;
-				}
+				set_host_port(&sa, s->check_port);
+
 				/* allow specific binding :
 				 * - server-specific at first
 				 * - proxy-specific next
@@ -1337,15 +1329,7 @@ struct task *process_chk(struct task *t)
 								break;
 
 							fdinfo[fd].port_range = s->sport_range;
-
-							switch (src.ss_family) {
-							case AF_INET:
-								((struct sockaddr_in *)&src)->sin_port = htons(fdinfo[fd].local_port);
-								break;
-							case AF_INET6:
-								((struct sockaddr_in6 *)&src)->sin6_port = htons(fdinfo[fd].local_port);
-								break;
-							}
+							set_host_port(&src, fdinfo[fd].local_port);
 
 							ret = tcp_bind_socket(fd, flags, &src, remote);
 						} while (ret != 0); /* binding NOK */

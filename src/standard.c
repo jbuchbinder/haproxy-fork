@@ -327,14 +327,7 @@ struct sockaddr_storage *str2sa(const char *str)
 	if (!ret)
 		goto out;
 
-	switch (ret->ss_family) {
-	case AF_INET:
-		((struct sockaddr_in *)ret)->sin_port = htons(port);
-		break;
-	case AF_INET6:
-		((struct sockaddr_in6 *)ret)->sin6_port = htons(port);
-		break;
-	}
+	set_host_port(ret, port);
  out:
 	free(str2);
 	return ret;
@@ -383,14 +376,7 @@ struct sockaddr_storage *str2sa_range(const char *str, int *low, int *high)
 	if (!ret)
 		goto out;
 
-	switch (ret->ss_family) {
-	case AF_INET:
-		((struct sockaddr_in *)ret)->sin_port = htons(portl);
-		break;
-	case AF_INET6:
-		((struct sockaddr_in6 *)ret)->sin6_port = htons(portl);
-		break;
-	}
+	set_host_port(ret, portl);
 
 	*low = portl;
 	*high = porth;
@@ -564,6 +550,42 @@ int url2sa(const char *url, int ulen, struct sockaddr_storage *addr)
 		return 0;
 	}
 
+	return -1;
+}
+
+/* Tries to convert a sockaddr_storage address to text form. Upon success, the
+ * address family is returned so that it's easy for the caller to adapt to the
+ * output format. Zero is returned if the address family is not supported. -1
+ * is returned upon error, with errno set. AF_INET, AF_INET6 and AF_UNIX are
+ * supported.
+ */
+int addr_to_str(struct sockaddr_storage *addr, char *str, int size)
+{
+
+	void *ptr;
+
+	if (size < 5)
+		return 0;
+	*str = '\0';
+
+	switch (addr->ss_family) {
+	case AF_INET:
+		ptr = &((struct sockaddr_in *)addr)->sin_addr;
+		break;
+	case AF_INET6:
+		ptr = &((struct sockaddr_in6 *)addr)->sin6_addr;
+		break;
+	case AF_UNIX:
+		memcpy(str, "unix", 5);
+		return addr->ss_family;
+	default:
+		return 0;
+	}
+
+	if (inet_ntop(addr->ss_family, ptr, str, size))
+		return addr->ss_family;
+
+	/* failed */
 	return -1;
 }
 

@@ -508,7 +508,7 @@ int http_find_header2(const char *name, int len,
 		 * another one on the same line.
 		 */
 		sol = ctx->line;
-		ctx->del = ctx->val + ctx->vlen;
+		ctx->del = ctx->val + ctx->vlen + ctx->tws;
 		sov = sol + ctx->del;
 		eol = sol + idx->v[cur_idx].len;
 
@@ -556,6 +556,11 @@ int http_find_header2(const char *name, int len,
 			ctx->val  = sov - sol;
 
 			eol = find_hdr_value_end(sov, eol);
+			ctx->tws = 0;
+			while (http_is_lws[(unsigned char)*(eol - 1)]) {
+				eol--;
+				ctx->tws++;
+			}
 			ctx->vlen = eol - sov;
 			return 1;
 		}
@@ -594,7 +599,7 @@ int http_remove_header2(struct http_msg *msg, struct buffer *buf,
 		return 0;
 
 	hdr = &idx->v[cur_idx];
-	if (sol[ctx->del] == ':' && ctx->val + ctx->vlen == hdr->len) {
+	if (sol[ctx->del] == ':' && ctx->val + ctx->vlen + ctx->tws == hdr->len) {
 		/* This was the only value of the header, we must now remove it entirely. */
 		delta = buffer_replace2(buf, sol, sol + hdr->len + hdr->cr + 1, NULL, 0);
 		http_msg_move_end(msg, delta);
@@ -606,23 +611,23 @@ int http_remove_header2(struct http_msg *msg, struct buffer *buf,
 		ctx->idx = ctx->prev;    /* walk back to the end of previous header */
 		ctx->line -= idx->v[ctx->idx].len + idx->v[cur_idx].cr + 1;
 		ctx->val = idx->v[ctx->idx].len; /* point to end of previous header */
-		ctx->vlen = 0;
+		ctx->tws = ctx->vlen = 0;
 		return ctx->idx;
 	}
 
 	/* This was not the only value of this header. We have to remove between
-	 * ctx->del+1 and ctx->val+ctx->vlen+1 included. If it is the last entry
-	 * of the list, we remove the last separator.
+	 * ctx->del+1 and ctx->val+ctx->vlen+ctx->tws+1 included. If it is the
+	 * last entry of the list, we remove the last separator.
 	 */
 
-	skip_comma = (ctx->val + ctx->vlen == hdr->len) ? 0 : 1;
+	skip_comma = (ctx->val + ctx->vlen + ctx->tws == hdr->len) ? 0 : 1;
 	delta = buffer_replace2(buf, sol + ctx->del + skip_comma,
-				sol + ctx->val + ctx->vlen + skip_comma,
+				sol + ctx->val + ctx->vlen + ctx->tws + skip_comma,
 				NULL, 0);
 	hdr->len += delta;
 	http_msg_move_end(msg, delta);
 	ctx->val = ctx->del;
-	ctx->vlen = 0;
+	ctx->tws = ctx->vlen = 0;
 	return ctx->idx;
 }
 
@@ -870,15 +875,7 @@ void http_sess_clflog(struct session *s)
 		(s->req->cons->conn_retries != be->conn_retries) ||
 		txn->status >= 500;
 
-	if (s->req->prod->addr.c.from.ss_family == AF_INET)
-		inet_ntop(AF_INET,
-		          (const void *)&((struct sockaddr_in *)&s->req->prod->addr.c.from)->sin_addr,
-		          pn, sizeof(pn));
-	else if (s->req->prod->addr.c.from.ss_family == AF_INET6)
-		inet_ntop(AF_INET6,
-		          (const void *)&((struct sockaddr_in6 *)(&s->req->prod->addr.c.from))->sin6_addr,
-		          pn, sizeof(pn));
-	else
+	if (addr_to_str(&s->req->prod->addr.c.from, pn, sizeof(pn)) == AF_UNIX)
 		snprintf(pn, sizeof(pn), "unix:%d", s->listener->luid);
 
 	get_gmtime(s->logs.accept_date.tv_sec, &tm);
@@ -920,9 +917,7 @@ void http_sess_clflog(struct session *s)
 	w = snprintf(h, sizeof(tmpline) - (h - tmpline),
 	             " %d %03d",
 		     s->req->prod->addr.c.from.ss_family == AF_UNIX ? s->listener->luid :
-	                 ntohs((s->req->prod->addr.c.from.ss_family == AF_INET) ?
-	                       ((struct sockaddr_in *)&s->req->prod->addr.c.from)->sin_port :
-	                       ((struct sockaddr_in6 *)&s->req->prod->addr.c.from)->sin6_port),
+		         get_host_port(&s->req->prod->addr.c.from),
 	             (int)s->logs.accept_date.tv_usec/1000);
 	if (w < 0 || w >= sizeof(tmpline) - (h - tmpline))
 		goto trunc;
@@ -1114,14 +1109,8 @@ void http_sess_log(struct session *s)
 	if (prx_log->options2 & PR_O2_CLFLOG)
 		return http_sess_clflog(s);
 
-	if (s->req->prod->addr.c.from.ss_family == AF_INET)
-		inet_ntop(AF_INET,
-			  (const void *)&((struct sockaddr_in *)&s->req->prod->addr.c.from)->sin_addr,
-			  pn, sizeof(pn));
-	else if (s->req->prod->addr.c.from.ss_family == AF_INET6)
-		inet_ntop(AF_INET6,
-			  (const void *)&((struct sockaddr_in6 *)(&s->req->prod->addr.c.from))->sin6_addr,
-			  pn, sizeof(pn));
+	if (addr_to_str(&s->req->prod->addr.c.from, pn, sizeof(pn)) == AF_UNIX)
+		snprintf(pn, sizeof(pn), "unix:%d", s->listener->luid);
 
 	get_localtime(s->logs.accept_date.tv_sec, &tm);
 
@@ -1197,9 +1186,7 @@ void http_sess_log(struct session *s)
 		 " %s %s %c%c%c%c %d/%d/%d/%d/%s%u %ld/%ld%s\n",
 		 (s->req->prod->addr.c.from.ss_family == AF_UNIX) ? "unix" : pn,
 		 (s->req->prod->addr.c.from.ss_family == AF_UNIX) ? s->listener->luid :
-		     ntohs((s->req->prod->addr.c.from.ss_family == AF_INET) ?
-		           ((struct sockaddr_in *)&s->req->prod->addr.c.from)->sin_port :
-		           ((struct sockaddr_in6 *)&s->req->prod->addr.c.from)->sin6_port),
+		     get_host_port(&s->req->prod->addr.c.from),
 		 tm.tm_mday, monthname[tm.tm_mon], tm.tm_year+1900,
 		 tm.tm_hour, tm.tm_min, tm.tm_sec, (int)s->logs.accept_date.tv_usec/1000,
 		 fe->id, be->id, svid,
@@ -2508,6 +2495,8 @@ int http_wait_for_request(struct session *s, struct buffer *req, int an_bit)
 			session_inc_http_req_ctr(s);
 			session_inc_http_err_ctr(s);
 			proxy_inc_fe_req_ctr(s->fe);
+			if (msg->err_pos < 0)
+				msg->err_pos = req->l;
 			goto return_bad_req;
 		}
 
@@ -2824,17 +2813,25 @@ int http_wait_for_request(struct session *s, struct buffer *req, int an_bit)
 	       http_find_header2("Content-Length", 14, msg->sol, &txn->hdr_idx, &ctx)) {
 		signed long long cl;
 
-		if (!ctx.vlen)
+		if (!ctx.vlen) {
+			msg->err_pos = ctx.line + ctx.val - req->data;
 			goto return_bad_req;
+		}
 
-		if (strl2llrc(ctx.line + ctx.val, ctx.vlen, &cl))
+		if (strl2llrc(ctx.line + ctx.val, ctx.vlen, &cl)) {
+			msg->err_pos = ctx.line + ctx.val - req->data;
 			goto return_bad_req; /* parse failure */
+		}
 
-		if (cl < 0)
+		if (cl < 0) {
+			msg->err_pos = ctx.line + ctx.val - req->data;
 			goto return_bad_req;
+		}
 
-		if ((txn->flags & TX_REQ_CNT_LEN) && (msg->chunk_len != cl))
+		if ((txn->flags & TX_REQ_CNT_LEN) && (msg->chunk_len != cl)) {
+			msg->err_pos = ctx.line + ctx.val - req->data;
 			goto return_bad_req; /* already specified, was different */
+		}
 
 		txn->flags |= TX_REQ_CNT_LEN | TX_REQ_XFER_LEN;
 		msg->body_len = msg->chunk_len = cl;
@@ -4776,6 +4773,8 @@ int http_wait_for_response(struct session *s, struct buffer *rep, int an_bit)
 
 		/* too large response does not fit in buffer. */
 		else if (rep->flags & BF_FULL) {
+			if (msg->err_pos < 0)
+				msg->err_pos = rep->l;
 			goto hdr_response_bad;
 		}
 
@@ -4829,9 +4828,9 @@ int http_wait_for_response(struct session *s, struct buffer *rep, int an_bit)
 			return 0;
 		}
 
-		/* close from server */
+		/* close from server, capture the response if the server has started to respond */
 		else if (rep->flags & BF_SHUTR) {
-			if (msg->err_pos >= 0)
+			if (msg->msg_state >= HTTP_MSG_RPVER || msg->err_pos >= 0)
 				http_capture_bad_message(&s->be->invalid_rep, s, rep, msg, msg->msg_state, s->fe);
 
 			s->be->be_counters.failed_resp++;
@@ -5037,17 +5036,25 @@ int http_wait_for_response(struct session *s, struct buffer *rep, int an_bit)
 	       http_find_header2("Content-Length", 14, msg->sol, &txn->hdr_idx, &ctx)) {
 		signed long long cl;
 
-		if (!ctx.vlen)
+		if (!ctx.vlen) {
+			msg->err_pos = ctx.line + ctx.val - rep->data;
 			goto hdr_response_bad;
+		}
 
-		if (strl2llrc(ctx.line + ctx.val, ctx.vlen, &cl))
+		if (strl2llrc(ctx.line + ctx.val, ctx.vlen, &cl)) {
+			msg->err_pos = ctx.line + ctx.val - rep->data;
 			goto hdr_response_bad; /* parse failure */
+		}
 
-		if (cl < 0)
+		if (cl < 0) {
+			msg->err_pos = ctx.line + ctx.val - rep->data;
 			goto hdr_response_bad;
+		}
 
-		if ((txn->flags & TX_RES_CNT_LEN) && (msg->chunk_len != cl))
+		if ((txn->flags & TX_RES_CNT_LEN) && (msg->chunk_len != cl)) {
+			msg->err_pos = ctx.line + ctx.val - rep->data;
 			goto hdr_response_bad; /* already specified, was different */
+		}
 
 		txn->flags |= TX_RES_CNT_LEN | TX_RES_XFER_LEN;
 		msg->body_len = msg->chunk_len = cl;
