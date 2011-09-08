@@ -65,7 +65,9 @@ struct global {
 	int uid;
 	int gid;
 	int nbproc;
-	int maxconn;
+	int maxconn, hardmaxconn;
+	struct freq_ctr conn_per_sec;
+	int cps_lim, cps_max;
 	int maxpipes;		/* max # of pipes */
 	int maxsock;		/* max # of sockets */
 	int rlimit_nofile;	/* default ulimit-n value : 0=unset */

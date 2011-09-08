@@ -415,7 +415,7 @@ int proxy_cfg_ensure_no_http(struct proxy *curproxy)
 
 /* Perform the most basic initialization of a proxy :
  * memset(), list_init(*), reset_timeouts(*).
- * Any new proxy should be initialized via this function.
+ * Any new proxy or peer should be initialized via this function.
  */
 void init_new_proxy(struct proxy *p)
 {
@@ -440,6 +440,7 @@ void init_new_proxy(struct proxy *p)
 	/* Timeouts are defined as -1 */
 	proxy_reset_timeouts(p);
 	p->tcp_rep.inspect_delay = TICK_ETERNITY;
+	p->logfac1 = p->logfac2 = -1; /* log disabled */
 }
 
 /*
@@ -615,17 +616,33 @@ void soft_stop(void)
 /* Temporarily disables listening on all of the proxy's listeners. Upon
  * success, the proxy enters the PR_PAUSED state. If disabling at least one
  * listener returns an error, then the proxy state is set to PR_STERROR
- * because we don't know how to resume from this.
+ * because we don't know how to resume from this. The function returns 0
+ * if it fails, or non-zero on success.
  */
-void pause_proxy(struct proxy *p)
+int pause_proxy(struct proxy *p)
 {
 	struct listener *l;
+
+	if (!(p->cap & PR_CAP_FE) || p->state == PR_STERROR ||
+	    p->state == PR_STSTOPPED || p->state == PR_STPAUSED)
+		return 1;
+
+	Warning("Pausing %s %s.\n", proxy_cap_str(p->cap), p->id);
+	send_log(p, LOG_WARNING, "Pausing %s %s.\n", proxy_cap_str(p->cap), p->id);
+
 	for (l = p->listen; l != NULL; l = l->next) {
 		if (!pause_listener(l))
 			p->state = PR_STERROR;
 	}
-	if (p->state != PR_STERROR)
-		p->state = PR_STPAUSED;
+
+	if (p->state == PR_STERROR) {
+		Warning("%s %s failed to enter pause mode.\n", proxy_cap_str(p->cap), p->id);
+		send_log(p, LOG_WARNING, "%s %s failed to enter pause mode.\n", proxy_cap_str(p->cap), p->id);
+		return 0;
+	}
+
+	p->state = PR_STPAUSED;
+	return 1;
 }
 
 
@@ -651,6 +668,55 @@ void stop_proxy(struct proxy *p)
 	p->state = PR_STSTOPPED;
 }
 
+/* This function resumes listening on the specified proxy. It scans all of its
+ * listeners and tries to enable them all. If any of them fails, the proxy is
+ * put back to the paused state. It returns 1 upon success, or zero if an error
+ * is encountered.
+ */
+int resume_proxy(struct proxy *p)
+{
+	struct listener *l;
+	int fail;
+
+	if (p->state != PR_STPAUSED)
+		return 1;
+
+	Warning("Enabling %s %s.\n", proxy_cap_str(p->cap), p->id);
+	send_log(p, LOG_WARNING, "Enabling %s %s.\n", proxy_cap_str(p->cap), p->id);
+
+	fail = 0;
+	for (l = p->listen; l != NULL; l = l->next) {
+		if (!resume_listener(l)) {
+			int port;
+
+			port = get_host_port(&l->addr);
+			if (port) {
+				Warning("Port %d busy while trying to enable %s %s.\n",
+					port, proxy_cap_str(p->cap), p->id);
+				send_log(p, LOG_WARNING, "Port %d busy while trying to enable %s %s.\n",
+					 port, proxy_cap_str(p->cap), p->id);
+			}
+			else {
+				Warning("Bind on socket %d busy while trying to enable %s %s.\n",
+					l->luid, proxy_cap_str(p->cap), p->id);
+				send_log(p, LOG_WARNING, "Bind on socket %d busy while trying to enable %s %s.\n",
+					 l->luid, proxy_cap_str(p->cap), p->id);
+			}
+
+			/* Another port might have been enabled. Let's stop everything. */
+			fail = 1;
+			break;
+		}
+	}
+
+	p->state = PR_STREADY;
+	if (fail) {
+		pause_proxy(p);
+		return 0;
+	}
+	return 1;
+}
+
 /*
  * This function temporarily disables listening so that another new instance
  * can start listening. It is designed to be called upon reception of a
@@ -667,39 +733,15 @@ void pause_proxies(void)
 	p = proxy;
 	tv_update_date(0,1); /* else, the old time before select will be used */
 	while (p) {
-		if (p->cap & PR_CAP_FE &&
-		    p->state != PR_STERROR &&
-		    p->state != PR_STSTOPPED &&
-		    p->state != PR_STPAUSED) {
-			Warning("Pausing %s %s.\n", proxy_cap_str(p->cap), p->id);
-			send_log(p, LOG_WARNING, "Pausing %s %s.\n", proxy_cap_str(p->cap), p->id);
-			pause_proxy(p);
-			if (p->state != PR_STPAUSED) {
-				err |= 1;
-				Warning("%s %s failed to enter pause mode.\n", proxy_cap_str(p->cap), p->id);
-				send_log(p, LOG_WARNING, "%s %s failed to enter pause mode.\n", proxy_cap_str(p->cap), p->id);
-			}
-		}
+		err |= !pause_proxy(p);
 		p = p->next;
 	}
 
 	prs = peers;
 	while (prs) {
 		p = prs->peers_fe;
-		if (p && (p->cap & PR_CAP_FE &&
-                    p->state != PR_STERROR &&
-                    p->state != PR_STSTOPPED &&
-                    p->state != PR_STPAUSED)) {
-                        Warning("Pausing %s %s.\n", proxy_cap_str(p->cap), p->id);
-                        send_log(p, LOG_WARNING, "Pausing %s %s.\n", proxy_cap_str(p->cap), p->id);
-                        pause_proxy(p);
-                        if (p->state != PR_STPAUSED) {
-                                err |= 1;
-                                Warning("%s %s failed to enter pause mode.\n", proxy_cap_str(p->cap), p->id);
-                                send_log(p, LOG_WARNING, "%s %s failed to enter pause mode.\n", proxy_cap_str(p->cap), p->id);
-                        }
-                }
-                prs = prs->next;
+		err |= !pause_proxy(p);
+		prs = prs->next;
         }
 
 	if (err) {
@@ -717,47 +759,28 @@ void pause_proxies(void)
  */
 void resume_proxies(void)
 {
+	int err;
 	struct proxy *p;
-	struct listener *l;
-	int fail;
+	struct peers *prs;
 
+	err = 0;
 	p = proxy;
 	tv_update_date(0,1); /* else, the old time before select will be used */
 	while (p) {
-		if (p->state == PR_STPAUSED) {
-			Warning("Enabling %s %s.\n", proxy_cap_str(p->cap), p->id);
-			send_log(p, LOG_WARNING, "Enabling %s %s.\n", proxy_cap_str(p->cap), p->id);
-
-			fail = 0;
-			for (l = p->listen; l != NULL; l = l->next) {
-				if (!resume_listener(l)) {
-					int port;
-
-					port = get_host_port(&l->addr);
-					if (port) {
-						Warning("Port %d busy while trying to enable %s %s.\n",
-							port, proxy_cap_str(p->cap), p->id);
-						send_log(p, LOG_WARNING, "Port %d busy while trying to enable %s %s.\n",
-							 port, proxy_cap_str(p->cap), p->id);
-					}
-					else {
-						Warning("Bind on socket %d busy while trying to enable %s %s.\n",
-							l->luid, proxy_cap_str(p->cap), p->id);
-						send_log(p, LOG_WARNING, "Bind on socket %d busy while trying to enable %s %s.\n",
-							 l->luid, proxy_cap_str(p->cap), p->id);
-					}
-
-					/* Another port might have been enabled. Let's stop everything. */
-					fail = 1;
-					break;
-				}
-			}
-
-			p->state = PR_STREADY;
-			if (fail)
-				pause_proxy(p);
-		}
+		err |= !resume_proxy(p);
 		p = p->next;
+	}
+
+	prs = peers;
+	while (prs) {
+		p = prs->peers_fe;
+		err |= !resume_proxy(p);
+		prs = prs->next;
+        }
+
+	if (err) {
+		Warning("Some proxies refused to resume, a restart is probably needed to resume safe operations.\n");
+		send_log(p, LOG_WARNING, "Some proxies refused to resume, a restart is probably needed to resume safe operations.\n");
 	}
 }
 

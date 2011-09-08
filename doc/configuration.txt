@@ -448,6 +448,7 @@ The following keywords are supported in the "global" section :
 
  * Performance tuning
    - maxconn
+   - maxconnrate
    - maxpipes
    - noepoll
    - nokqueue
@@ -648,6 +649,16 @@ maxconn <number>
   is equivalent to the command-line argument "-n". Proxies will stop accepting
   connections when this limit is reached. The "ulimit-n" parameter is
   automatically adjusted according to this value. See also "ulimit-n".
+
+maxconnrate <number>
+  Sets the maximum per-process number of connections per second to <number>.
+  Proxies will stop accepting connections when this limit is reached. It can be
+  used to limit the global capacity regardless of each frontend capacity. It is
+  important to note that this can only be used as a service protection measure,
+  as there will not necessarily be a fair share between frontends when the
+  limit is reached, so it's a good idea to also limit each frontend to some
+  value close to its expected share. Also, lowering tune.maxaccept can improve
+  fairness.
 
 maxpipes <number>
   Sets the maximum per-process number of pipes to <number>. Currently, pipes
@@ -8861,6 +8872,8 @@ each of which has a special meaning :
         D : the session was killed by haproxy because the server was detected
             as down and was configured to kill all connections when going down.
 
+        K : the session was actively killed by an admin operating on haproxy.
+
         c : the client-side timeout expired while waiting for the client to
             send or receive data.
 
@@ -9502,6 +9515,22 @@ clear table <table> [ data.<type> <operator> <value> ] | [ key <key> ]
         $ echo "show table http_proxy" | socat stdio /tmp/sock1
     >>> # table: http_proxy, type: ip, size:204800, used:1
 
+disable frontend <frontend>
+  Mark the frontend as temporarily stopped. This corresponds to the mode which
+  is used during a soft restart : the frontend releases the port but can be
+  enabled again if needed. This should be used with care as some non-Linux OSes
+  are unable to enable it back. This is intended to be used in environments
+  where stopping a proxy is not even imaginable but a misconfigured proxy must
+  be fixed. That way it's possible to release the port and bind it into another
+  process to restore operations. The frontend will appear with status "STOP"
+  on the stats page.
+
+  The frontend may be specified either by its name or by its numeric ID,
+  prefixed with a sharp ('#').
+
+  This command is restricted and can only be issued on sockets configured for
+  level "admin".
+
 disable server <backend>/<server>
   Mark the server DOWN for maintenance. In this mode, no more checks will be
   performed on the server until it leaves maintenance.
@@ -9513,6 +9542,19 @@ disable server <backend>/<server>
 
   Both the backend and the server may be specified either by their name or by
   their numeric ID, prefixed with a sharp ('#').
+
+  This command is restricted and can only be issued on sockets configured for
+  level "admin".
+
+enable frontend <frontend>
+  Resume a frontend which was temporarily stopped. It is possible that some of
+  the listening ports won't be able to bind anymore (eg: if another process
+  took them since the 'disable frontend' operation). If this happens, an error
+  is displayed. Some operating systems might not be able to resume a frontend
+  which was disabled.
+
+  The frontend may be specified either by its name or by its numeric ID,
+  prefixed with a sharp ('#').
 
   This command is restricted and can only be issued on sockets configured for
   level "admin".
@@ -9560,6 +9602,20 @@ set maxconn frontend <frontend> <value>
   the current number of connections, new connections acceptation will be
   delayed until the threshold is reached. The frontend might be specified by
   either its name or its numeric ID prefixed with a sharp ('#').
+
+set maxconn global <maxconn>
+  Dynamically change the global maxconn setting within the range defined by the
+  initial global maxconn setting. If it is increased and connections were
+  pending, they will immediately be accepted. If it is lowered to a value below
+  the current number of connections, new connections acceptation will be
+  delayed until the threshold is reached. A value of zero restores the initial
+  setting.
+
+set rate-limit connections global <value>
+  Change the process-wide connection rate limit, which is set by the global
+  'maxconnrate' setting. A value of zero disables the limitation. This limit
+  applies to all frontends and the change has an immediate effect. The value
+  is passed in number of connections per second.
 
 set timeout cli <delay>
   Change the CLI interface timeout for current connection. This can be useful
@@ -9758,6 +9814,35 @@ show table <name> [ data.<type> <operator> <value> ] | [ key <key> ]
           | socat stdio /tmp/sock1 \
           | fgrep 'key=' | cut -d' ' -f2 | cut -d= -f2 > abusers-ip.txt
           ( or | awk '/key/{ print a[split($2,a,"=")]; }' )
+
+shutdown frontend <frontend>
+  Completely delete the specified frontend. All the ports it was bound to will
+  be released. It will not be possible to enable the frontend anymore after
+  this operation. This is intended to be used in environments where stopping a
+  proxy is not even imaginable but a misconfigured proxy must be fixed. That
+  way it's possible to release the port and bind it into another process to
+  restore operations. The frontend will not appear at all on the stats page
+  once it is terminated.
+
+  The frontend may be specified either by its name or by its numeric ID,
+  prefixed with a sharp ('#').
+
+  This command is restricted and can only be issued on sockets configured for
+  level "admin".
+
+shutdown session <id>
+  Immediately terminate the session matching the specified session identifier.
+  This identifier is the first field at the beginning of the lines in the dumps
+  of "show sess" (it corresponds to the session pointer). This can be used to
+  terminate a long-running session without waiting for a timeout or when an
+  endless transfer is ongoing. Such terminated sessions are reported with a 'K'
+  flag in the logs.
+
+shutdown sessions <backend>/<server>
+  Immediately terminate all the sessions attached to the specified server. This
+  can be used to terminate long-running sessions after a server is put into
+  maintenance mode, for instance. Such terminated sessions are reported with a
+  'K' flag in the logs.
 
 /*
  * Local variables:

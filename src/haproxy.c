@@ -68,6 +68,7 @@
 #include <types/global.h>
 #include <types/proto_tcp.h>
 #include <types/acl.h>
+#include <types/peers.h>
 
 #include <proto/auth.h>
 #include <proto/acl.h>
@@ -106,7 +107,6 @@ struct global global = {
 	loglev1 : 7, /* max syslog level : debug */
 	loglev2 : 7,
 	.stats_sock = {
-		.maxconn = 10, /* 10 concurrent stats connections */
 		.perm = {
 			 .ux = {
 				 .uid = -1,
@@ -600,8 +600,21 @@ void init(int argc, char **argv)
 	}
 
 
+	global.hardmaxconn = global.maxconn;  /* keep this max value */
 	global.maxsock += global.maxconn * 2; /* each connection needs two sockets */
 	global.maxsock += global.maxpipes * 2; /* each pipe needs two FDs */
+
+	if (global.stats_fe)
+		global.maxsock += global.stats_fe->maxconn;
+
+	if (peers) {
+		/* peers also need to bypass global maxconn */
+		struct peers *p = peers;
+
+		for (p = peers; p; p = p->next)
+			if (p->peers_fe)
+				global.maxsock += p->peers_fe->maxconn;
+	}
 
 	if (global.tune.maxpollevents <= 0)
 		global.tune.maxpollevents = MAX_POLL_EVENTS;
@@ -1038,7 +1051,6 @@ void run_poll_loop()
 static struct task *manage_global_listener_queue(struct task *t)
 {
 	int next = TICK_ETERNITY;
-	fprintf(stderr, "coucou!\n");
 	/* queue is empty, nothing to do */
 	if (LIST_ISEMPTY(&global_listener_queue))
 		goto out;
@@ -1056,8 +1068,7 @@ static struct task *manage_global_listener_queue(struct task *t)
 	 * as a file descriptor or memory and that the temporary condition has
 	 * disappeared.
 	 */
-	if (!LIST_ISEMPTY(&global_listener_queue))
-		dequeue_all_listeners(&global_listener_queue);
+	dequeue_all_listeners(&global_listener_queue);
 
  out:
 	t->expire = next;

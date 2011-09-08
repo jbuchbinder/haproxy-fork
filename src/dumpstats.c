@@ -91,9 +91,11 @@ static const char stats_sock_usage_msg[] =
 	"  get weight     : report a server's current weight\n"
 	"  set weight     : change a server's weight\n"
 	"  set timeout    : change a timeout setting\n"
-	"  disable server : set a server in maintenance mode\n"
-	"  enable server  : re-enable a server that was previously in maintenance mode\n"
 	"  set maxconn    : change a maxconn setting\n"
+	"  set rate-limit : change a rate limiting value\n"
+	"  disable        : put a server or frontend in maintenance mode\n"
+	"  enable         : re-enable a server or frontend which is in maintenance mode\n"
+	"  shutdown       : kill a session or a frontend (eg:to release listening ports)\n"
 	"";
 
 static const char stats_permission_denied_msg[] =
@@ -169,6 +171,9 @@ static struct proxy *alloc_stats_fe(const char *name)
 	fe->last_change = now.tv_sec;
 	fe->id = strdup("GLOBAL");
 	fe->cap = PR_CAP_FE;
+	fe->maxconn = 10;                 /* default to 10 concurrent connections */
+	fe->timeout.client = MS_TO_TICKS(10000); /* default timeout of 10 seconds */
+
 	return fe;
 }
 
@@ -208,11 +213,10 @@ static int stats_parse_global(char **args, int section_type, struct proxy *curpx
 				snprintf(err, errlen, "out of memory");
 				return -1;
 			}
-			global.stats_fe->timeout.client = MS_TO_TICKS(10000); /* default timeout of 10 seconds */
 		}
 
 		global.stats_sock.state = LI_INIT;
-		global.stats_sock.options = LI_O_NONE;
+		global.stats_sock.options = LI_O_UNLIMITED;
 		global.stats_sock.accept = session_accept;
 		global.stats_fe->accept = stats_accept;
 		global.stats_sock.handler = process_session;
@@ -220,7 +224,7 @@ static int stats_parse_global(char **args, int section_type, struct proxy *curpx
 		global.stats_sock.nice = -64;  /* we want to boost priority for local stats */
 		global.stats_sock.frontend = global.stats_fe;
 		global.stats_sock.perm.ux.level = ACCESS_LVL_OPER; /* default access level */
-		global.stats_fe->maxconn = global.stats_sock.maxconn;
+		global.stats_sock.maxconn = global.stats_fe->maxconn;
 		global.stats_sock.timeout = &global.stats_fe->timeout.client;
 
 		global.stats_sock.next  = global.stats_fe->listen;
@@ -312,11 +316,14 @@ static int stats_parse_global(char **args, int section_type, struct proxy *curpx
 			snprintf(err, errlen, "a positive value is expected for 'stats maxconn' in 'global section'");
 			return -1;
 		}
-		global.maxsock -= global.stats_sock.maxconn;
-		global.stats_sock.maxconn = maxconn;
-		global.maxsock += global.stats_sock.maxconn;
-		if (global.stats_fe)
-			global.stats_fe->maxconn = global.stats_sock.maxconn;
+
+		if (!global.stats_fe) {
+			if ((global.stats_fe = alloc_stats_fe("GLOBAL")) == NULL) {
+				snprintf(err, errlen, "out of memory");
+				return -1;
+			}
+		}
+		global.stats_fe->maxconn = maxconn;
 	}
 	else {
 		snprintf(err, errlen, "'stats' only supports 'socket', 'maxconn' and 'timeout' in 'global' section");
@@ -1216,6 +1223,80 @@ err_args:
 	si->applet.st0 = STAT_CLI_PRINT;
 }
 
+/* Expects to find a frontend named <arg> and returns it, otherwise displays various
+ * adequate error messages and returns NULL. This function also expects the session
+ * level to be admin.
+ */
+static struct proxy *expect_frontend_admin(struct session *s, struct stream_interface *si, const char *arg)
+{
+	struct proxy *px;
+
+	if (s->listener->perm.ux.level < ACCESS_LVL_ADMIN) {
+		si->applet.ctx.cli.msg = stats_permission_denied_msg;
+		si->applet.st0 = STAT_CLI_PRINT;
+		return NULL;
+	}
+
+	if (!*arg) {
+		si->applet.ctx.cli.msg = "A frontend name is expected.\n";
+		si->applet.st0 = STAT_CLI_PRINT;
+		return NULL;
+	}
+
+	px = findproxy(arg, PR_CAP_FE);
+	if (!px) {
+		si->applet.ctx.cli.msg = "No such frontend.\n";
+		si->applet.st0 = STAT_CLI_PRINT;
+		return NULL;
+	}
+	return px;
+}
+
+/* Expects to find a backend and a server in <arg> under the form <backend>/<server>,
+ * and returns the pointer to the server. Otherwise, display adequate error messages
+ * and returns NULL. This function also expects the session level to be admin. Note:
+ * the <arg> is modified to remove the '/'.
+ */
+static struct server *expect_server_admin(struct session *s, struct stream_interface *si, char *arg)
+{
+	struct proxy *px;
+	struct server *sv;
+	char *line;
+
+	if (s->listener->perm.ux.level < ACCESS_LVL_ADMIN) {
+		si->applet.ctx.cli.msg = stats_permission_denied_msg;
+		si->applet.st0 = STAT_CLI_PRINT;
+		return NULL;
+	}
+
+	/* split "backend/server" and make <line> point to server */
+	for (line = arg; *line; line++)
+		if (*line == '/') {
+			*line++ = '\0';
+			break;
+		}
+
+	if (!*line || !*arg) {
+		si->applet.ctx.cli.msg = "Require 'backend/server'.\n";
+		si->applet.st0 = STAT_CLI_PRINT;
+		return NULL;
+	}
+
+	if (!get_backend_server(arg, line, &px, &sv)) {
+		si->applet.ctx.cli.msg = px ? "No such server.\n" : "No such backend.\n";
+		si->applet.st0 = STAT_CLI_PRINT;
+		return NULL;
+	}
+
+	if (px->state == PR_STSTOPPED) {
+		si->applet.ctx.cli.msg = "Proxy is disabled.\n";
+		si->applet.st0 = STAT_CLI_PRINT;
+		return NULL;
+	}
+
+	return sv;
+}
+
 /* Processes the stats interpreter on the statistics socket. This function is
  * called from an applet running in a stream interface. The function returns 1
  * if the request was understood, otherwise zero. It sets si->applet.st0 to a value
@@ -1363,6 +1444,7 @@ static int stats_sock_parse_request(struct stream_interface *si, char *line)
 					}
 			}
 
+			global.cps_max = 0;
 			return 1;
 		}
 		else if (strcmp(args[1], "table") == 0) {
@@ -1414,40 +1496,20 @@ static int stats_sock_parse_request(struct stream_interface *si, char *line)
 			struct server *sv;
 			int w;
 
-			if (s->listener->perm.ux.level < ACCESS_LVL_ADMIN) {
-				si->applet.ctx.cli.msg = stats_permission_denied_msg;
-				si->applet.st0 = STAT_CLI_PRINT;
+			sv = expect_server_admin(s, si, args[2]);
+			if (!sv)
 				return 1;
-			}
-
-			/* split "backend/server" and make <line> point to server */
-			for (line = args[2]; *line; line++)
-				if (*line == '/') {
-					*line++ = '\0';
-					break;
-				}
-
-			if (!*line || !*args[3]) {
-				si->applet.ctx.cli.msg = "Require 'backend/server' and 'weight' or 'weight%'.\n";
-				si->applet.st0 = STAT_CLI_PRINT;
-				return 1;
-			}
-
-			if (!get_backend_server(args[2], line, &px, &sv)) {
-				si->applet.ctx.cli.msg = px ? "No such server.\n" : "No such backend.\n";
-				si->applet.st0 = STAT_CLI_PRINT;
-				return 1;
-			}
-
-			if (px->state == PR_STSTOPPED) {
-				si->applet.ctx.cli.msg = "Proxy is disabled.\n";
-				si->applet.st0 = STAT_CLI_PRINT;
-				return 1;
-			}
+			px = sv->proxy;
 
 			/* if the weight is terminated with '%', it is set relative to
 			 * the initial weight, otherwise it is absolute.
 			 */
+			if (!*args[3]) {
+				si->applet.ctx.cli.msg = "Require <weight> or <weight%>.\n";
+				si->applet.st0 = STAT_CLI_PRINT;
+				return 1;
+			}
+
 			w = atoi(args[3]);
 			if (strchr(args[3], '%') != NULL) {
 				if (w < 0 || w > 100) {
@@ -1527,24 +1589,9 @@ static int stats_sock_parse_request(struct stream_interface *si, char *line)
 				struct listener *l;
 				int v;
 
-				if (s->listener->perm.ux.level < ACCESS_LVL_ADMIN) {
-					si->applet.ctx.cli.msg = stats_permission_denied_msg;
-					si->applet.st0 = STAT_CLI_PRINT;
+				px = expect_frontend_admin(s, si, args[3]);
+				if (!px)
 					return 1;
-				}
-
-				if (!*args[3]) {
-					si->applet.ctx.cli.msg = "Frontend name expected.\n";
-					si->applet.st0 = STAT_CLI_PRINT;
-					return 1;
-				}
-
-				px = findproxy(args[3], PR_CAP_FE);
-				if (!px) {
-					si->applet.ctx.cli.msg = "No such frontend.\n";
-					si->applet.st0 = STAT_CLI_PRINT;
-					return 1;
-				}
 
 				if (!*args[4]) {
 					si->applet.ctx.cli.msg = "Integer value expected.\n";
@@ -1575,8 +1622,86 @@ static int stats_sock_parse_request(struct stream_interface *si, char *line)
 
 				return 1;
 			}
+			else if (strcmp(args[2], "global") == 0) {
+				int v;
+
+				if (s->listener->perm.ux.level < ACCESS_LVL_ADMIN) {
+					si->applet.ctx.cli.msg = stats_permission_denied_msg;
+					si->applet.st0 = STAT_CLI_PRINT;
+					return 1;
+				}
+
+				if (!*args[3]) {
+					si->applet.ctx.cli.msg = "Expects an integer value.\n";
+					si->applet.st0 = STAT_CLI_PRINT;
+					return 1;
+				}
+
+				v = atoi(args[3]);
+				if (v > global.hardmaxconn) {
+					si->applet.ctx.cli.msg = "Value out of range.\n";
+					si->applet.st0 = STAT_CLI_PRINT;
+					return 1;
+				}
+
+				/* check for unlimited values */
+				if (v <= 0)
+					v = global.hardmaxconn;
+
+				global.maxconn = v;
+
+				/* Dequeues all of the listeners waiting for a resource */
+				if (!LIST_ISEMPTY(&global_listener_queue))
+					dequeue_all_listeners(&global_listener_queue);
+
+				return 1;
+			}
 			else {
-				si->applet.ctx.cli.msg = "'set maxconn' only supports 'frontend'.\n";
+				si->applet.ctx.cli.msg = "'set maxconn' only supports 'frontend' and 'global'.\n";
+				si->applet.st0 = STAT_CLI_PRINT;
+				return 1;
+			}
+		}
+		else if (strcmp(args[1], "rate-limit") == 0) {
+			if (strcmp(args[2], "connections") == 0) {
+				if (strcmp(args[3], "global") == 0) {
+					int v;
+
+					if (s->listener->perm.ux.level < ACCESS_LVL_ADMIN) {
+						si->applet.ctx.cli.msg = stats_permission_denied_msg;
+						si->applet.st0 = STAT_CLI_PRINT;
+						return 1;
+					}
+
+					if (!*args[4]) {
+						si->applet.ctx.cli.msg = "Expects an integer value.\n";
+						si->applet.st0 = STAT_CLI_PRINT;
+						return 1;
+					}
+
+					v = atoi(args[4]);
+					if (v < 0) {
+						si->applet.ctx.cli.msg = "Value out of range.\n";
+						si->applet.st0 = STAT_CLI_PRINT;
+						return 1;
+					}
+
+					global.cps_lim = v;
+
+					/* Dequeues all of the listeners waiting for a resource */
+					if (!LIST_ISEMPTY(&global_listener_queue))
+						dequeue_all_listeners(&global_listener_queue);
+
+					return 1;
+				}
+				else {
+					si->applet.ctx.cli.msg = "'set rate-limit connections' only supports 'global'.\n";
+					si->applet.st0 = STAT_CLI_PRINT;
+					return 1;
+				}
+			}
+			else {
+				si->applet.ctx.cli.msg = "'set rate-limit' only supports 'connections'.\n";
 				si->applet.st0 = STAT_CLI_PRINT;
 				return 1;
 			}
@@ -1587,39 +1712,11 @@ static int stats_sock_parse_request(struct stream_interface *si, char *line)
 	}
 	else if (strcmp(args[0], "enable") == 0) {
 		if (strcmp(args[1], "server") == 0) {
-			struct proxy *px;
 			struct server *sv;
 
-			if (s->listener->perm.ux.level < ACCESS_LVL_ADMIN) {
-				si->applet.ctx.cli.msg = stats_permission_denied_msg;
-				si->applet.st0 = STAT_CLI_PRINT;
+			sv = expect_server_admin(s, si, args[2]);
+			if (!sv)
 				return 1;
-			}
-
-			/* split "backend/server" and make <line> point to server */
-			for (line = args[2]; *line; line++)
-				if (*line == '/') {
-					*line++ = '\0';
-					break;
-				}
-
-			if (!*line || !*args[2]) {
-				si->applet.ctx.cli.msg = "Require 'backend/server'.\n";
-				si->applet.st0 = STAT_CLI_PRINT;
-				return 1;
-			}
-
-			if (!get_backend_server(args[2], line, &px, &sv)) {
-				si->applet.ctx.cli.msg = px ? "No such server.\n" : "No such backend.\n";
-				si->applet.st0 = STAT_CLI_PRINT;
-				return 1;
-			}
-
-			if (px->state == PR_STSTOPPED) {
-				si->applet.ctx.cli.msg = "Proxy is disabled.\n";
-				si->applet.st0 = STAT_CLI_PRINT;
-				return 1;
-			}
 
 			if (sv->state & SRV_MAINTAIN) {
 				/* The server is really in maintenance, we can change the server state */
@@ -1642,45 +1739,45 @@ static int stats_sock_parse_request(struct stream_interface *si, char *line)
 
 			return 1;
 		}
+		else if (strcmp(args[1], "frontend") == 0) {
+			struct proxy *px;
+
+			px = expect_frontend_admin(s, si, args[2]);
+			if (!px)
+				return 1;
+
+			if (px->state == PR_STSTOPPED) {
+				si->applet.ctx.cli.msg = "Frontend was previously shut down, cannot enable.\n";
+				si->applet.st0 = STAT_CLI_PRINT;
+				return 1;
+			}
+
+			if (px->state != PR_STPAUSED) {
+				si->applet.ctx.cli.msg = "Frontend is already enabled.\n";
+				si->applet.st0 = STAT_CLI_PRINT;
+				return 1;
+			}
+
+			if (!resume_proxy(px)) {
+				si->applet.ctx.cli.msg = "Failed to resume frontend, check logs for precise cause (port conflict?).\n";
+				si->applet.st0 = STAT_CLI_PRINT;
+				return 1;
+			}
+			return 1;
+		}
 		else { /* unknown "enable" parameter */
-			return 0;
+			si->applet.ctx.cli.msg = "'enable' only supports 'frontend' and 'server'.\n";
+			si->applet.st0 = STAT_CLI_PRINT;
+			return 1;
 		}
 	}
 	else if (strcmp(args[0], "disable") == 0) {
 		if (strcmp(args[1], "server") == 0) {
-			struct proxy *px;
 			struct server *sv;
 
-			if (s->listener->perm.ux.level < ACCESS_LVL_ADMIN) {
-				si->applet.ctx.cli.msg = stats_permission_denied_msg;
-				si->applet.st0 = STAT_CLI_PRINT;
+			sv = expect_server_admin(s, si, args[2]);
+			if (!sv)
 				return 1;
-			}
-
-			/* split "backend/server" and make <line> point to server */
-			for (line = args[2]; *line; line++)
-				if (*line == '/') {
-					*line++ = '\0';
-					break;
-				}
-
-			if (!*line || !*args[2]) {
-				si->applet.ctx.cli.msg = "Require 'backend/server'.\n";
-				si->applet.st0 = STAT_CLI_PRINT;
-				return 1;
-			}
-
-			if (!get_backend_server(args[2], line, &px, &sv)) {
-				si->applet.ctx.cli.msg = px ? "No such server.\n" : "No such backend.\n";
-				si->applet.st0 = STAT_CLI_PRINT;
-				return 1;
-			}
-
-			if (px->state == PR_STSTOPPED) {
-				si->applet.ctx.cli.msg = "Proxy is disabled.\n";
-				si->applet.st0 = STAT_CLI_PRINT;
-				return 1;
-			}
 
 			if (! (sv->state & SRV_MAINTAIN)) {
 				/* Not already in maintenance, we can change the server state */
@@ -1690,8 +1787,118 @@ static int stats_sock_parse_request(struct stream_interface *si, char *line)
 
 			return 1;
 		}
+		else if (strcmp(args[1], "frontend") == 0) {
+			struct proxy *px;
+
+			px = expect_frontend_admin(s, si, args[2]);
+			if (!px)
+				return 1;
+
+			if (px->state == PR_STSTOPPED) {
+				si->applet.ctx.cli.msg = "Frontend was previously shut down, cannot disable.\n";
+				si->applet.st0 = STAT_CLI_PRINT;
+				return 1;
+			}
+
+			if (px->state == PR_STPAUSED) {
+				si->applet.ctx.cli.msg = "Frontend is already disabled.\n";
+				si->applet.st0 = STAT_CLI_PRINT;
+				return 1;
+			}
+
+			if (!pause_proxy(px)) {
+				si->applet.ctx.cli.msg = "Failed to pause frontend, check logs for precise cause.\n";
+				si->applet.st0 = STAT_CLI_PRINT;
+				return 1;
+			}
+			return 1;
+		}
 		else { /* unknown "disable" parameter */
-			return 0;
+			si->applet.ctx.cli.msg = "'disable' only supports 'frontend' and 'server'.\n";
+			si->applet.st0 = STAT_CLI_PRINT;
+			return 1;
+		}
+	}
+	else if (strcmp(args[0], "shutdown") == 0) {
+		if (strcmp(args[1], "frontend") == 0) {
+			struct proxy *px;
+
+			px = expect_frontend_admin(s, si, args[2]);
+			if (!px)
+				return 1;
+
+			if (px->state == PR_STSTOPPED) {
+				si->applet.ctx.cli.msg = "Frontend was already shut down.\n";
+				si->applet.st0 = STAT_CLI_PRINT;
+				return 1;
+			}
+
+			Warning("Proxy %s stopped (FE: %lld conns, BE: %lld conns).\n",
+				px->id, px->fe_counters.cum_conn, px->be_counters.cum_conn);
+			send_log(px, LOG_WARNING, "Proxy %s stopped (FE: %lld conns, BE: %lld conns).\n",
+				 px->id, px->fe_counters.cum_conn, px->be_counters.cum_conn);
+			stop_proxy(px);
+			return 1;
+		}
+		else if (strcmp(args[1], "session") == 0) {
+			struct session *sess, *ptr;
+
+			if (s->listener->perm.ux.level < ACCESS_LVL_ADMIN) {
+				si->applet.ctx.cli.msg = stats_permission_denied_msg;
+				si->applet.st0 = STAT_CLI_PRINT;
+				return 1;
+			}
+
+			if (!*args[2]) {
+				si->applet.ctx.cli.msg = "Session pointer expected (use 'show sess').\n";
+				si->applet.st0 = STAT_CLI_PRINT;
+				return 1;
+			}
+
+			ptr = (void *)strtoul(args[2], NULL, 0);
+
+			/* first, look for the requested session in the session table */
+			list_for_each_entry(sess, &sessions, list) {
+				if (sess == ptr)
+					break;
+			}
+
+			/* do we have the session ? */
+			if (sess != ptr) {
+				si->applet.ctx.cli.msg = "No such session (use 'show sess').\n";
+				si->applet.st0 = STAT_CLI_PRINT;
+				return 1;
+			}
+
+			session_shutdown(sess, SN_ERR_KILLED);
+			return 1;
+		}
+		else if (strcmp(args[1], "sessions") == 0) {
+			if (strcmp(args[2], "server") == 0) {
+				struct server *sv;
+				struct session *sess, *sess_bck;
+
+				sv = expect_server_admin(s, si, args[3]);
+				if (!sv)
+					return 1;
+
+				/* kill all the session that are on this server */
+				list_for_each_entry_safe(sess, sess_bck, &sv->actconns, by_srv)
+					if (sess->srv_conn == sv)
+						session_shutdown(sess, SN_ERR_KILLED);
+
+				return 1;
+			}
+			else {
+				si->applet.ctx.cli.msg = "'shutdown sessions' only supports 'server'.\n";
+				si->applet.st0 = STAT_CLI_PRINT;
+				return 1;
+			}
+		}
+		else { /* unknown "disable" parameter */
+			si->applet.ctx.cli.msg = "'shutdown' only supports 'frontend', 'session' and 'sessions'.\n";
+			si->applet.st0 = STAT_CLI_PRINT;
+			return 1;
 		}
 	}
 	else { /* not "show" nor "clear" nor "get" nor "set" nor "enable" nor "disable" */
@@ -1948,10 +2155,14 @@ static int stats_dump_raw_to_buffer(struct stream_interface *si)
 				     "Ulimit-n: %d\n"
 				     "Maxsock: %d\n"
 				     "Maxconn: %d\n"
+				     "Hard_maxconn: %d\n"
 				     "Maxpipes: %d\n"
 				     "CurrConns: %d\n"
 				     "PipesUsed: %d\n"
 				     "PipesFree: %d\n"
+				     "ConnRate: %d\n"
+				     "ConnRateLimit: %d\n"
+				     "MaxConnRate: %d\n"
 				     "Tasks: %d\n"
 				     "Run_queue: %d\n"
 				     "node: %s\n"
@@ -1964,8 +2175,9 @@ static int stats_dump_raw_to_buffer(struct stream_interface *si)
 				     up,
 				     global.rlimit_memmax,
 				     global.rlimit_nofile,
-				     global.maxsock, global.maxconn, global.maxpipes,
+				     global.maxsock, global.maxconn, global.hardmaxconn, global.maxpipes,
 				     actconn, pipes_used, pipes_free,
+				     read_freq_ctr(&global.conn_per_sec), global.cps_lim, global.cps_max,
 				     nb_tasks_cur, run_queue_cur,
 				     global.node, global.desc?global.desc:""
 				     );
@@ -2302,7 +2514,7 @@ static int stats_dump_http(struct stream_interface *si, struct uri_auth *uri)
 			     "<b>uptime = </b> %dd %dh%02dm%02ds<br>\n"
 			     "<b>system limits:</b> memmax = %s%s; ulimit-n = %d<br>\n"
 			     "<b>maxsock = </b> %d; <b>maxconn = </b> %d; <b>maxpipes = </b> %d<br>\n"
-			     "current conns = %d; current pipes = %d/%d<br>\n"
+			     "current conns = %d; current pipes = %d/%d; conn rate = %d/sec<br>\n"
 			     "Running tasks: %d/%d<br>\n"
 			     "</td><td align=\"center\" nowrap>\n"
 			     "<table class=\"lgd\"><tr>\n"
@@ -2335,7 +2547,7 @@ static int stats_dump_http(struct stream_interface *si, struct uri_auth *uri)
 			     global.rlimit_memmax ? " MB" : "",
 			     global.rlimit_nofile,
 			     global.maxsock, global.maxconn, global.maxpipes,
-			     actconn, pipes_used, pipes_used+pipes_free,
+			     actconn, pipes_used, pipes_used+pipes_free, read_freq_ctr(&global.conn_per_sec),
 			     run_queue_cur, nb_tasks_cur
 			     );
 

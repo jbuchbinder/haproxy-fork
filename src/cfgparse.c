@@ -682,6 +682,19 @@ int cfg_parse_global(const char *file, int linenum, char **args, int kwm)
 		}
 #endif /* SYSTEM_MAXCONN */
 	}
+	else if (!strcmp(args[0], "maxconnrate")) {
+		if (global.cps_lim != 0) {
+			Alert("parsing [%s:%d] : '%s' already specified. Continuing.\n", file, linenum, args[0]);
+			err_code |= ERR_ALERT;
+			goto out;
+		}
+		if (*(args[1]) == 0) {
+			Alert("parsing [%s:%d] : '%s' expects an integer argument.\n", file, linenum, args[0]);
+			err_code |= ERR_ALERT | ERR_FATAL;
+			goto out;
+		}
+		global.cps_lim = atol(args[1]);
+	}
 	else if (!strcmp(args[0], "maxpipes")) {
 		if (global.maxpipes != 0) {
 			Alert("parsing [%s:%d] : '%s' already specified. Continuing.\n", file, linenum, args[0]);
@@ -1027,7 +1040,6 @@ void init_default_instance()
 	defproxy.state = PR_STNEW;
 	defproxy.maxconn = cfg_maxpconn;
 	defproxy.conn_retries = CONN_RETRIES;
-	defproxy.logfac1 = defproxy.logfac2 = -1; /* log disabled */
 
 	defproxy.defsrv.inter = DEF_CHKINTR;
 	defproxy.defsrv.fastinter = 0;
@@ -1249,7 +1261,7 @@ int cfg_parse_peers(const char *file, int linenum, char **args, int kwm)
 				curpeers->peers_fe->last_change = now.tv_sec;
 				curpeers->peers_fe->id = strdup(args[1]);
 				curpeers->peers_fe->cap = PR_CAP_FE;
-				curpeers->peers_fe->maxconn = 65000;
+				curpeers->peers_fe->maxconn = 0;
 				curpeers->peers_fe->conn_retries = CONN_RETRIES;
 				curpeers->peers_fe->timeout.connect = 5000;
 				curpeers->peers_fe->accept = peer_accept;
@@ -1265,6 +1277,8 @@ int cfg_parse_peers(const char *file, int linenum, char **args, int kwm)
 				curpeers->peers_fe->listen->frontend =  ((struct proxy *)curpeers->peers_fe);
 				curpeers->peers_fe->listen->handler = process_session;
 				curpeers->peers_fe->listen->analysers |=  ((struct proxy *)curpeers->peers_fe)->fe_req_ana;
+				curpeers->peers_fe->listen->options |= LI_O_UNLIMITED; /* don't make the peers subject to global limits */
+				global.maxsock += curpeers->peers_fe->listen->maxconn;
 			}
 		}
 	} /* neither "peer" nor "peers" */
@@ -5868,8 +5882,8 @@ int check_config_validity()
 				cfgerr++;
 			}
 			else if (!curpeers->peers_fe) {
-				Alert("Proxy '%s': unable to identify local peer in peers section '%s'.\n",
-				      curproxy->id, curpeers->id);
+				Alert("Proxy '%s': unable to find local peer '%s' in peers section '%s'.\n",
+				      curproxy->id, localpeer, curpeers->id);
 				cfgerr++;
 			}
 		}
@@ -6549,6 +6563,43 @@ out_uri_auth_compat:
 		for (optnum = 0; cfg_opts2[optnum].name; optnum++)
 			if (curproxy->options2 & cfg_opts2[optnum].val)
 				global.last_checks |= cfg_opts2[optnum].checks;
+	}
+
+	if (peers) {
+		struct peers *curpeers = peers, **last;
+		struct peer *p, *pb;
+
+		/* Remove all peers sections which don't have a valid listener.
+		 * This can happen when a peers section is never referenced and
+		 * does not contain a local peer.
+		 */
+		last = &peers;
+		while (*last) {
+			curpeers = *last;
+			if (curpeers->peers_fe) {
+				last = &curpeers->next;
+				continue;
+			}
+
+			Warning("Removing incomplete section 'peers %s' (no peer named '%s').\n",
+				curpeers->id, localpeer);
+
+			p = curpeers->remote;
+			while (p) {
+				pb = p->next;
+				free(p->id);
+				free(p);
+				p = pb;
+			}
+
+			/* Destroy and unlink this curpeers section.
+			 * Note: curpeers is backed up into *last.
+			 */
+			free(curpeers->id);
+			curpeers = curpeers->next;
+			free(*last);
+			*last = curpeers;
+		}
 	}
 
 	if (cfgerr > 0)
