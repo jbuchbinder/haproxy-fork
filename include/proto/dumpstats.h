@@ -70,14 +70,14 @@
 #ifdef USE_API
 #define STAT_API_CMD_NOOP "noop"	/* no operation */
 #define STAT_API_CMD_VERSION "version"	/* request version */
-#define STAT_API_CMD_POOL_GETSERVERS "pool.getservers"	/* get list of servers in pool */
-#define STAT_API_CMD_POOL_ENABLE "pool.enable" /* enable single server */
-#define STAT_API_CMD_POOL_DISABLE "pool.disable" /* disable single server */
-#define STAT_API_CMD_POOL_STATUS "pool.status" /* single server status */
-#define STAT_API_CMD_POOL_CONTENTS "pool.contents" /* list of all servers */
-#define STAT_API_CMD_POOL_ADD "pool.add" /* add server */
-#define STAT_API_CMD_POOL_REMOVE "pool.remove" /* remove server */
-#define STAT_API_CMD_POOL_WEIGHT "pool.weight" /* set weight */
+#define STAT_API_CMD_POOL_GETSERVERS "frontend.getservers"	/* get list of servers in pool */
+#define STAT_API_CMD_POOL_ENABLE "backend.enable" /* enable single server */
+#define STAT_API_CMD_POOL_DISABLE "backend.disable" /* disable single server */
+#define STAT_API_CMD_POOL_STATUS "backend.status" /* single server status */
+#define STAT_API_CMD_POOL_CONTENTS "frontend.contents" /* list of all servers */
+#define STAT_API_CMD_POOL_ADD "backend.add" /* add server */
+#define STAT_API_CMD_POOL_REMOVE "backend.remove" /* remove server */
+#define STAT_API_CMD_POOL_WEIGHT "backend.weight" /* set weight */
 
 #endif /* USE_API */
 
