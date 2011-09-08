@@ -7473,6 +7473,7 @@ int stats_check_uri(struct stream_interface *si, struct http_txn *txn, struct pr
 			si->applet.ctx.stats.api_data = param;
 			return 1;
 		}
+#ifdef USE_API_DANGEROUS
 		if (memcmp(h, STAT_API_CMD_POOL_ADD, strlen(STAT_API_CMD_POOL_ADD)) == 0) {
 			si->applet.ctx.stats.api_action = STAT_API_CMD_POOL_ADD;
 			h += strlen(STAT_API_CMD_POOL_ADD);
@@ -7503,6 +7504,7 @@ int stats_check_uri(struct stream_interface *si, struct http_txn *txn, struct pr
 			si->applet.ctx.stats.api_data = param;
 			return 1;
 		}
+#endif /* USE_API_DANGEROUS */
 		if (memcmp(h, STAT_API_CMD_POOL_WEIGHT, strlen(STAT_API_CMD_POOL_WEIGHT)) == 0) {
 			si->applet.ctx.stats.api_action = STAT_API_CMD_POOL_WEIGHT;
 			h += strlen(STAT_API_CMD_POOL_WEIGHT);

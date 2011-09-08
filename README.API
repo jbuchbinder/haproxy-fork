@@ -6,10 +6,15 @@ REST-type API to expose haproxy administration and stats.
 If haproxy is compiled with "-DUSE_API=1", it will enable this interface,
 which is located at $STATSURL/api/$COMMAND
 
+If you specify "-DUSE_API_DANGEROUS=1", it will enable functions which
+could cause grievous harm to your system, yourself, or your cat. Be warned.
+
+This patch is completely removed by not declaring USE_API.
+
 The list of possible values for $COMMAND are listed below.
 
-"pool.add" command
-------------------
+"pool.add" command [DANGEROUS]
+------------------------------
 
 Dynamically add a server to a proxy. Takes a single argument, a URL encoded
 JSON string.
@@ -35,8 +40,8 @@ Possible keys are:
 	fall (int) - Time in iterations to come down
 	weight (int) - Initial load balancing weight
 
-"pool.remove" command
-----------------------
+"pool.remove" command [DANGEROUS]
+---------------------------------
 
 Takes two arguments, proxy and server. Removes a server from a proxy
 permanently.

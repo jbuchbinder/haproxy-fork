@@ -594,6 +594,7 @@ static int api_call(struct stream_interface *si, struct chunk *msg)
 
 		return chunk_printf(msg, json_object_to_json_string(out_array));
 	}
+#ifdef USE_API_DANGEROUS
 	if (memcmp(si->applet.ctx.stats.api_action, STAT_API_CMD_POOL_ADD, strlen(STAT_API_CMD_POOL_ADD)) == 0) {
 		/* pool.add */
 
@@ -722,6 +723,7 @@ static int api_call(struct stream_interface *si, struct chunk *msg)
 
 		return chunk_printf(msg, STAT_API_RETURN_OK);
 	}
+#endif /* USE_API_DANGEROUS */
 	if (memcmp(si->applet.ctx.stats.api_action, STAT_API_CMD_POOL_WEIGHT, strlen(STAT_API_CMD_POOL_WEIGHT)) == 0) {
 		/* pool.weight */
 
@@ -817,6 +819,7 @@ static int api_call(struct stream_interface *si, struct chunk *msg)
 
 		return chunk_printf(msg, STAT_API_RETURN_OK);
 	}
+#ifdef USE_API_DANGEROUS
 	if (memcmp(si->applet.ctx.stats.api_action, STAT_API_CMD_POOL_REMOVE, strlen(STAT_API_CMD_POOL_REMOVE)) == 0) {
 		/* pool.remove */
 
@@ -870,6 +873,7 @@ static int api_call(struct stream_interface *si, struct chunk *msg)
 
 		return chunk_printf(msg, STAT_API_RETURN_OK);
 	}
+#endif /* USE_API_DANGEROUS */
 	if (memcmp(si->applet.ctx.stats.api_action, STAT_API_CMD_POOL_GETSERVERS, strlen(STAT_API_CMD_POOL_GETSERVERS)) == 0) {
 		/* pool.getservers */
 		json_object *out = json_object_new_array();
