@@ -21,7 +21,7 @@
 #include <stdio.h>
 #include <unistd.h>
 
-// return 1 if the integer contains at least one zero byte
+// return non-zero if the integer contains at least one zero byte
 static inline unsigned int has_zero(unsigned int x)
 {
 	unsigned int y;
@@ -38,18 +38,16 @@ static inline unsigned int has_zero(unsigned int x)
 	 * we check in the final result if one of them is present and was not.
 	 */
 	y = x;
-	x = ~x & 0x80808080; /* save and invert bits 7, 15, 23, 31 */
-	y &= 0x7F7F7F7F;     /* clear them */
 	y -= 0x01010101;     /* generate a carry */
-	y &= x;              /* clear the bits that were already set */
-	return !!y;
+	y &= ~x;             /* clear the bits that were already set */
+	return y & 0x80808080;
 }
 
 
 #define FGETS2_BUFSIZE		(256*1024)
 const char *fgets2(FILE *stream)
 {
-	static char buffer[FGETS2_BUFSIZE + 5];
+	static char buffer[FGETS2_BUFSIZE + 32];
 	static char *end = buffer;
 	static char *line = buffer;
 
@@ -66,8 +64,10 @@ const char *fgets2(FILE *stream)
 		while (next < end && (((unsigned long)next) & 3) && *next != '\n')
 			next++;
 
-		/* now next is multiple of 4 or equal to end */
-		while (next <= (end-32)) {
+		/* Now next is multiple of 4 or equal to end. We know we can safely
+		 * read up to 32 bytes past end if needed because they're allocated.
+		 */
+		while (next < end) {
 			if (has_zero(*(unsigned int *)next ^ 0x0A0A0A0A))
 				break;
 			next += 4;
@@ -94,8 +94,8 @@ const char *fgets2(FILE *stream)
 			next += 4;
 		}
 
-		/* we finish if needed. Note that next might be slightly higher
-		 * than end here because we might have gone past it above.
+		/* We finish if needed : if <next> is below <end>, it means we
+		 * found an LF in one of the 4 following bytes.
 		 */
 		while (next < end) {
 			if (*next == '\n') {
@@ -110,7 +110,8 @@ const char *fgets2(FILE *stream)
 
 		/* we found an incomplete line. First, let's move the
 		 * remaining part of the buffer to the beginning, then
-		 * try to complete the buffer with a new read.
+		 * try to complete the buffer with a new read. We can't
+		 * rely on <next> anymore because it went past <end>.
 		 */
 		if (line > buffer) {
 			if (end != line)
@@ -135,6 +136,7 @@ const char *fgets2(FILE *stream)
 		}
 
 		end += ret;
+		*end = '\n';  /* make parser stop ASAP */
 		/* search for '\n' again */
 	}
 }

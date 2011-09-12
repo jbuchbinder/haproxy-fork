@@ -15,7 +15,6 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <stdbool.h>
-#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -2169,6 +2168,7 @@ static int stats_dump_raw_to_buffer(struct stream_interface *si)
 				     "MaxConnRate: %d\n"
 				     "Tasks: %d\n"
 				     "Run_queue: %d\n"
+				     "Idle_pct: %d\n"
 				     "node: %s\n"
 				     "description: %s\n"
 				     "",
@@ -2182,7 +2182,7 @@ static int stats_dump_raw_to_buffer(struct stream_interface *si)
 				     global.maxsock, global.maxconn, global.hardmaxconn, global.maxpipes,
 				     actconn, pipes_used, pipes_free,
 				     read_freq_ctr(&global.conn_per_sec), global.cps_lim, global.cps_max,
-				     nb_tasks_cur, run_queue_cur,
+				     nb_tasks_cur, run_queue_cur, idle_pct,
 				     global.node, global.desc?global.desc:""
 				     );
 			if (buffer_feed_chunk(si->ib, &msg) >= 0)
@@ -2519,7 +2519,7 @@ static int stats_dump_http(struct stream_interface *si, struct uri_auth *uri)
 			     "<b>system limits:</b> memmax = %s%s; ulimit-n = %d<br>\n"
 			     "<b>maxsock = </b> %d; <b>maxconn = </b> %d; <b>maxpipes = </b> %d<br>\n"
 			     "current conns = %d; current pipes = %d/%d; conn rate = %d/sec<br>\n"
-			     "Running tasks: %d/%d<br>\n"
+			     "Running tasks: %d/%d; idle = %d %%<br>\n"
 			     "</td><td align=\"center\" nowrap>\n"
 			     "<table class=\"lgd\"><tr>\n"
 			     "<td class=\"active3\">&nbsp;</td><td class=\"noborder\">active UP </td>"
@@ -2552,7 +2552,7 @@ static int stats_dump_http(struct stream_interface *si, struct uri_auth *uri)
 			     global.rlimit_nofile,
 			     global.maxsock, global.maxconn, global.maxpipes,
 			     actconn, pipes_used, pipes_used+pipes_free, read_freq_ctr(&global.conn_per_sec),
-			     run_queue_cur, nb_tasks_cur
+			     run_queue_cur, nb_tasks_cur, idle_pct
 			     );
 
 			if (si->applet.ctx.stats.flags & STAT_HIDE_DOWN)
@@ -2871,7 +2871,8 @@ static int stats_dump_proxy(struct stream_interface *si, struct proxy *px, struc
 					for (i = 1; i < 6; i++)
 						chunk_printf(&msg, " %dxx=%lld,", i, px->fe_counters.p.http.rsp[i]);
 
-					chunk_printf(&msg, " other=%lld\"", px->fe_counters.p.http.rsp[0]);
+					chunk_printf(&msg, " other=%lld,", px->fe_counters.p.http.rsp[0]);
+					chunk_printf(&msg, " intercepted=%lld\"", px->fe_counters.intercepted_req);
 				}
 
 				chunk_printf(&msg,
