@@ -79,10 +79,7 @@ struct global {
 	char *pidfile;
 	char *node, *desc;		/* node name & description */
 	char *log_tag;                  /* name for syslog */
-	int logfac1, logfac2;
-	int loglev1, loglev2;
-	int minlvl1, minlvl2;
-	struct logsrv logsrv1, logsrv2;
+	struct list logsrvs;
 	char *log_send_hostname;   /* set hostname in syslog header */
 	struct {
 		int maxpollevents; /* max number of poll events at once */
@@ -96,6 +93,8 @@ struct global {
 		int server_sndbuf; /* set server sndbuf to this value if not null */
 		int server_rcvbuf; /* set server rcvbuf to this value if not null */
 		int chksize;       /* check buffer size in bytes, defaults to BUFSIZE */
+		int pipesize;      /* pipe size in bytes, system defaults if zero */
+		int max_http_hdr;  /* max number of HTTP headers, use MAX_HTTP_HDR if zero */
 	} tune;
 	struct {
 		char *prefix;           /* path prefix of unix bind socket */

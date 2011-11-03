@@ -134,9 +134,9 @@ int frontend_accept(struct session *s)
 		 * that we may make use of them. This of course includes
 		 * (mode == PR_MODE_HTTP).
 		 */
-		s->txn.hdr_idx.size = MAX_HTTP_HDR;
+		s->txn.hdr_idx.size = global.tune.max_http_hdr;
 
-		if (unlikely((s->txn.hdr_idx.v = pool_alloc2(s->fe->hdr_idx_pool)) == NULL))
+		if (unlikely((s->txn.hdr_idx.v = pool_alloc2(pool2_hdr_idx)) == NULL))
 			goto out_free_rspcap; /* no memory */
 
 		/* and now initialize the HTTP transaction state */
@@ -144,7 +144,7 @@ int frontend_accept(struct session *s)
 	}
 
 	if ((s->fe->mode == PR_MODE_TCP || s->fe->mode == PR_MODE_HTTP)
-	    && (s->fe->logfac1 >= 0 || s->fe->logfac2 >= 0)) {
+	    && (!LIST_ISEMPTY(&s->fe->logsrvs))) {
 		if (likely(s->fe->to_log)) {
 			/* we have the client ip */
 			if (s->logs.logwait & LW_CLIP)

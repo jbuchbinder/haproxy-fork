@@ -436,11 +436,11 @@ void init_new_proxy(struct proxy *p)
 	LIST_INIT(&p->req_add);
 	LIST_INIT(&p->rsp_add);
 	LIST_INIT(&p->listener_queue);
+	LIST_INIT(&p->logsrvs);
 
 	/* Timeouts are defined as -1 */
 	proxy_reset_timeouts(p);
 	p->tcp_rep.inspect_delay = TICK_ETERNITY;
-	p->logfac1 = p->logfac2 = -1; /* log disabled */
 }
 
 /*
@@ -813,13 +813,13 @@ int session_set_backend(struct session *s, struct proxy *be)
 	 * a struct hdr_idx for it if we did not have one.
 	 */
 	if (unlikely(!s->txn.hdr_idx.v && (be->acl_requires & ACL_USE_L7_ANY))) {
-		if ((s->txn.hdr_idx.v = pool_alloc2(s->fe->hdr_idx_pool)) == NULL)
+		if ((s->txn.hdr_idx.v = pool_alloc2(pool2_hdr_idx)) == NULL)
 			return 0; /* not enough memory */
 
 		/* and now initialize the HTTP transaction state */
 		http_init_txn(s);
 
-		s->txn.hdr_idx.size = MAX_HTTP_HDR;
+		s->txn.hdr_idx.size = global.tune.max_http_hdr;
 		hdr_idx_init(&s->txn.hdr_idx);
 	}
 

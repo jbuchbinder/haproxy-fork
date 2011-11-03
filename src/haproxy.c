@@ -76,6 +76,7 @@
 #include <proto/buffers.h>
 #include <proto/checks.h>
 #include <proto/fd.h>
+#include <proto/hdr_idx.h>
 #include <proto/log.h>
 #include <proto/protocols.h>
 #include <proto/proto_http.h>
@@ -102,10 +103,7 @@ int  relative_pid = 1;		/* process id starting at 1 */
 
 /* global options */
 struct global global = {
-	logfac1 : -1,
-	logfac2 : -1,
-	loglev1 : 7, /* max syslog level : debug */
-	loglev2 : 7,
+	.logsrvs = LIST_HEAD_INIT(global.logsrvs),
 	.stats_sock = {
 		.perm = {
 			 .ux = {
@@ -787,6 +785,7 @@ void deinit(void)
 	struct wordlist *wl, *wlb;
 	struct cond_wordlist *cwl, *cwlb;
 	struct uri_auth *uap, *ua = NULL;
+	struct logsrv *log, *logb;
 	int i;
 
 	deinit_signals();
@@ -892,6 +891,11 @@ void deinit(void)
 			free(rdr);
 		}
 
+		list_for_each_entry_safe(log, logb, &p->logsrvs, list) {
+			LIST_DEL(&log->list);
+			free(log);
+		}
+
 		deinit_tcp_rules(&p->tcp_req.inspect_rules);
 		deinit_tcp_rules(&p->tcp_req.l4_rules);
 
@@ -927,6 +931,11 @@ void deinit(void)
 				task_free(s->check);
 			}
 
+			if (s->warmup) {
+				task_delete(s->warmup);
+				task_free(s->warmup);
+			}
+
 			free(s->id);
 			free(s->cookie);
 			free(s->check_data);
@@ -953,7 +962,6 @@ void deinit(void)
 
 		pool_destroy2(p->req_cap_pool);
 		pool_destroy2(p->rsp_cap_pool);
-		pool_destroy2(p->hdr_idx_pool);
 		pool_destroy2(p->table.pool);
 
 		p0 = p;
@@ -990,6 +998,10 @@ void deinit(void)
 	free(oldpids);        oldpids = NULL;
 	free(global_listener_queue_task); global_listener_queue_task = NULL;
 
+	list_for_each_entry_safe(log, logb, &global.logsrvs, list) {
+			LIST_DEL(&log->list);
+			free(log);
+		}
 	list_for_each_entry_safe(wl, wlb, &cfg_cfgfiles, list) {
 		LIST_DEL(&wl->list);
 		free(wl);
@@ -1003,6 +1015,7 @@ void deinit(void)
 	pool_destroy2(pool2_appsess);
 	pool_destroy2(pool2_pendconn);
 	pool_destroy2(pool2_sig_handlers);
+	pool_destroy2(pool2_hdr_idx);
     
 	if (have_appsession) {
 		pool_destroy2(apools.serverid);

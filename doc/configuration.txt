@@ -458,9 +458,11 @@ The following keywords are supported in the "global" section :
    - spread-checks
    - tune.bufsize
    - tune.chksize
+   - tune.http.maxhdr
    - tune.maxaccept
    - tune.maxpollevents
    - tune.maxrewrite
+   - tune.pipesize
    - tune.rcvbuf.client
    - tune.rcvbuf.server
    - tune.sndbuf.client
@@ -724,6 +726,17 @@ tune.chksize <number>
   build time. It is not recommended to change this value, but to use better
   checks whenever possible.
 
+tune.http.maxhdr <number>
+  Sets the maximum number of headers in a request. When a request comes with a
+  number of headers greater than this value (including the first line), it is
+  rejected with a "400 Bad Request" status code. Similarly, too large responses
+  are blocked with "502 Bad Gateway". The default value is 101, which is enough
+  for all usages, considering that the widely deployed Apache server uses the
+  same limit. It can be useful to push this limit further to temporarily allow
+  a buggy application to work by the time it gets fixed. Keep in mind that each
+  new header consumes 32bits of memory for each session, so don't push this
+  limit too high.
+
 tune.maxaccept <number>
   Sets the maximum number of consecutive accepts that a process may perform on
   a single wake up. High values give higher priority to high connection rates,
@@ -752,6 +765,14 @@ tune.maxrewrite <number>
   to about 1024. It is automatically readjusted to half of bufsize if it is
   larger than that. This means you don't have to worry about it when changing
   bufsize.
+
+tune.pipesize <number>
+  Sets the kernel pipe buffer size to this size (in bytes). By default, pipes
+  are the default size for the system. But sometimes when using TCP splicing,
+  it can improve performance to increase pipe sizes, especially if it is
+  suspected that pipes are not filled and that many calls to splice() are
+  performed. This has an impact on the kernel's memory footprint, so this must
+  not be changed if impacts are not understood.
 
 tune.rcvbuf.client <number>
 tune.rcvbuf.server <number>
@@ -977,7 +998,7 @@ http-check send-state                     X          -         X         X
 http-request                              -          X         X         X
 id                                        -          X         X         X
 ignore-persist                            -          X         X         X
-log                                       X          X         X         X
+log                                  (*)  X          X         X         X
 maxconn                                   X          X         X         -
 mode                                      X          X         X         X
 monitor fail                              -          X         X         -
@@ -2539,9 +2560,16 @@ ignore-persist { if | unless } <condition>
 
 log global
 log <address> <facility> [<level> [<minlevel>]]
+no log
   Enable per-instance logging of events and traffic.
   May be used in sections :   defaults | frontend | listen | backend
                                  yes   |    yes   |   yes  |   yes
+
+  Prefix :
+    no         should be used when the logger list must be flushed. For example,
+               if you don't want to inherit from the default logger list. This
+               prefix does not allow arguments.
+
   Arguments :
     global     should be used when the instance's logging parameters are the
                same as the global ones. This is the most common usage. "global"
@@ -2583,14 +2611,9 @@ log <address> <facility> [<level> [<minlevel>]]
 
                  emerg  alert  crit   err    warning notice info  debug
 
-  Note that up to two "log" entries may be specified per instance. However, if
-  "log global" is used and if the "global" section already contains 2 log
-  entries, then additional log entries will be ignored.
-
-  Also, it is important to keep in mind that it is the frontend which decides
-  what to log from a connection, and that in case of content switching, the log
-  entries from the backend will be ignored. Connections are logged at level
-  "info".
+  It is important to keep in mind that it is the frontend which decides what to
+  log from a connection, and that in case of content switching, the log entries
+  from the backend will be ignored. Connections are logged at level "info".
 
   However, backend log declaration define how and where servers status changes
   will be logged. Level "notice" will be used to indicate a server going up,

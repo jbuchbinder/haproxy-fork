@@ -44,6 +44,7 @@
 #include <proto/checks.h>
 #include <proto/dumpstats.h>
 #include <proto/frontend.h>
+#include <proto/hdr_idx.h>
 #include <proto/lb_chash.h>
 #include <proto/lb_fwlc.h>
 #include <proto/lb_fwrr.h>
@@ -587,6 +588,22 @@ int cfg_parse_global(const char *file, int linenum, char **args, int kwm)
 		}
 		global.tune.server_sndbuf = atol(args[1]);
 	}
+	else if (!strcmp(args[0], "tune.pipesize")) {
+		if (*(args[1]) == 0) {
+			Alert("parsing [%s:%d] : '%s' expects an integer argument.\n", file, linenum, args[0]);
+			err_code |= ERR_ALERT | ERR_FATAL;
+			goto out;
+		}
+		global.tune.pipesize = atol(args[1]);
+	}
+	else if (!strcmp(args[0], "tune.http.maxhdr")) {
+		if (*(args[1]) == 0) {
+			Alert("parsing [%s:%d] : '%s' expects an integer argument.\n", file, linenum, args[0]);
+			err_code |= ERR_ALERT | ERR_FATAL;
+			goto out;
+		}
+		global.tune.max_http_hdr = atol(args[1]);
+	}
 	else if (!strcmp(args[0], "uid")) {
 		if (global.uid != 0) {
 			Alert("parsing [%s:%d] : user/uid already specified. Continuing.\n", file, linenum);
@@ -874,40 +891,57 @@ int cfg_parse_global(const char *file, int linenum, char **args, int kwm)
 			goto out;
                 }
 	}
+	else if (!strcmp(args[0], "log") && kwm == KWM_NO) { /* no log */
+		/* delete previous herited or defined syslog servers */
+		struct logsrv *back;
+		struct logsrv *tmp;
+
+		if (*(args[1]) != 0) {
+			Alert("parsing [%s:%d]:%s : 'no log' does not expect arguments.\n", file, linenum, args[1]);
+			err_code |= ERR_ALERT | ERR_FATAL;
+			goto out;
+		}
+
+		list_for_each_entry_safe(tmp, back, &global.logsrvs, list) {
+			LIST_DEL(&tmp->list);
+			free(tmp);
+		}
+	}
 	else if (!strcmp(args[0], "log")) {  /* syslog server address */
-		struct logsrv logsrv;
-		int facility, level, minlvl;
-	
+		struct logsrv *logsrv;
+
 		if (*(args[1]) == 0 || *(args[2]) == 0) {
 			Alert("parsing [%s:%d] : '%s' expects <address> and <facility> as arguments.\n", file, linenum, args[0]);
 			err_code |= ERR_ALERT | ERR_FATAL;
 			goto out;
 		}
-	
-		facility = get_log_facility(args[2]);
-		if (facility < 0) {
+
+		logsrv = calloc(1, sizeof(struct logsrv));
+
+		logsrv->facility = get_log_facility(args[2]);
+		if (logsrv->facility < 0) {
 			Alert("parsing [%s:%d] : unknown log facility '%s'\n", file, linenum, args[2]);
 			err_code |= ERR_ALERT | ERR_FATAL;
-			facility = 0;
+			logsrv->facility = 0;
 		}
 
-		level = 7; /* max syslog level = debug */
+		logsrv->level = 7; /* max syslog level = debug */
 		if (*(args[3])) {
-			level = get_log_level(args[3]);
-			if (level < 0) {
+			logsrv->level = get_log_level(args[3]);
+			if (logsrv->level < 0) {
 				Alert("parsing [%s:%d] : unknown optional log level '%s'\n", file, linenum, args[3]);
 				err_code |= ERR_ALERT | ERR_FATAL;
-				level = 0;
+				logsrv->level = 0;
 			}
 		}
 
-		minlvl = 0; /* limit syslog level to this level (emerg) */
+		logsrv->minlvl = 0; /* limit syslog level to this level (emerg) */
 		if (*(args[4])) {
-			minlvl = get_log_level(args[4]);
-			if (minlvl < 0) {
+			logsrv->minlvl = get_log_level(args[4]);
+			if (logsrv->minlvl < 0) {
 				Alert("parsing [%s:%d] : unknown optional minimum log level '%s'\n", file, linenum, args[4]);
 				err_code |= ERR_ALERT | ERR_FATAL;
-				minlvl = 0;
+				logsrv->minlvl = 0;
 			}
 		}
 
@@ -917,37 +951,24 @@ int cfg_parse_global(const char *file, int linenum, char **args, int kwm)
 				Alert("parsing [%s:%d] : Socket path '%s' too long (max %d)\n", file, linenum,
 				      args[1], (int)sizeof(((struct sockaddr_un *)&sk)->sun_path) - 1);
 				err_code |= ERR_ALERT | ERR_FATAL;
+				free(logsrv);
 				goto out;
 			}
-			logsrv.addr = *sk;
+			logsrv->addr = *sk;
 		} else {
 			struct sockaddr_storage *sk = str2sa(args[1]);
 			if (!sk) {
 				Alert("parsing [%s:%d] : Unknown host in '%s'\n", file, linenum, args[1]);
 				err_code |= ERR_ALERT | ERR_FATAL;
+				free(logsrv);
 				goto out;
 			}
-			logsrv.addr = *sk;
-			if (!get_host_port(&logsrv.addr))
-				set_host_port(&logsrv.addr, SYSLOG_PORT);
+			logsrv->addr = *sk;
+			if (!get_host_port(&logsrv->addr))
+				set_host_port(&logsrv->addr, SYSLOG_PORT);
 		}
 
-		if (global.logfac1 == -1) {
-			global.logsrv1 = logsrv;
-			global.logfac1 = facility;
-			global.loglev1 = level;
-			global.minlvl1 = minlvl;
-		}
-		else if (global.logfac2 == -1) {
-			global.logsrv2 = logsrv;
-			global.logfac2 = facility;
-			global.loglev2 = level;
-			global.minlvl2 = minlvl;
-		}
-		else {
-			Alert("parsing [%s:%d] : too many syslog servers\n", file, linenum);
-			err_code |= ERR_ALERT | ERR_FATAL;
-		}
+		LIST_ADDQ(&global.logsrvs, &logsrv->list);
 	}
 	else if (!strcmp(args[0], "log-send-hostname")) { /* set the hostname in syslog header */
 		char *name;
@@ -1302,6 +1323,7 @@ int cfg_parse_listen(const char *file, int linenum, char **args, int kwm)
 	unsigned val;
 	int err_code = 0;
 	struct acl_cond *cond = NULL;
+	struct logsrv *tmp;
 
 	if (!strcmp(args[0], "listen"))
 		rc = PR_CAP_LISTEN;
@@ -1504,14 +1526,15 @@ int cfg_parse_listen(const char *file, int linenum, char **args, int kwm)
 		}
 
 		curproxy->mode = defproxy.mode;
-		curproxy->logfac1 = defproxy.logfac1;
-		curproxy->logsrv1 = defproxy.logsrv1;
-		curproxy->loglev1 = defproxy.loglev1;
-		curproxy->minlvl1 = defproxy.minlvl1;
-		curproxy->logfac2 = defproxy.logfac2;
-		curproxy->logsrv2 = defproxy.logsrv2;
-		curproxy->loglev2 = defproxy.loglev2;
-		curproxy->minlvl2 = defproxy.minlvl2;
+
+		/* copy default logsrvs to curproxy */
+		list_for_each_entry(tmp, &defproxy.logsrvs, list) {
+			struct logsrv *node = malloc(sizeof(struct logsrv));
+			memcpy(node, tmp, sizeof(struct logsrv));
+			LIST_INIT(&node->list);
+			LIST_ADDQ(&curproxy->logsrvs, &node->list);
+		}
+
 		curproxy->grace  = defproxy.grace;
 		curproxy->conf.used_listener_id = EB_ROOT;
 		curproxy->conf.used_server_id = EB_ROOT;
@@ -4498,44 +4521,64 @@ stats_error_parsing:
 			newsrv->prev_state = newsrv->state;
 		}
 	}
+	else if (!strcmp(args[0], "log") && kwm == KWM_NO) {
+		/* delete previous herited or defined syslog servers */
+		struct logsrv *back;
+
+		if (*(args[1]) != 0) {
+			Alert("parsing [%s:%d]:%s : 'no log' does not expect arguments.\n", file, linenum, args[1]);
+			err_code |= ERR_ALERT | ERR_FATAL;
+			goto out;
+		}
+
+		list_for_each_entry_safe(tmp, back, &curproxy->logsrvs, list) {
+			LIST_DEL(&tmp->list);
+			free(tmp);
+		}
+	}
 	else if (!strcmp(args[0], "log")) {  /* syslog server address */
-		struct logsrv logsrv;
-		int facility;
-	
+		struct logsrv *logsrv;
+
 		if (*(args[1]) && *(args[2]) == 0 && !strcmp(args[1], "global")) {
-			curproxy->logfac1 = global.logfac1;
-			curproxy->logsrv1 = global.logsrv1;
-			curproxy->loglev1 = global.loglev1;
-			curproxy->minlvl1 = global.minlvl1;
-			curproxy->logfac2 = global.logfac2;
-			curproxy->logsrv2 = global.logsrv2;
-			curproxy->loglev2 = global.loglev2;
-			curproxy->minlvl2 = global.minlvl2;
+			/* copy global.logrsvs linked list to the end of curproxy->logsrvs */
+			list_for_each_entry(tmp, &global.logsrvs, list) {
+				struct logsrv *node = malloc(sizeof(struct logsrv));
+				memcpy(node, tmp, sizeof(struct logsrv));
+				LIST_INIT(&node->list);
+				LIST_ADDQ(&curproxy->logsrvs, &node->list);
+			}
 		}
 		else if (*(args[1]) && *(args[2])) {
-			int level, minlvl;
 
-			facility = get_log_facility(args[2]);
-			if (facility < 0) {
+			logsrv = calloc(1, sizeof(struct logsrv));
+
+			logsrv->facility = get_log_facility(args[2]);
+			if (logsrv->facility < 0) {
 				Alert("parsing [%s:%d] : unknown log facility '%s'\n", file, linenum, args[2]);
-				exit(1);
+				err_code |= ERR_ALERT | ERR_FATAL;
+				goto out;
+
 			}
 	    
-			level = 7; /* max syslog level = debug */
+			logsrv->level = 7; /* max syslog level = debug */
 			if (*(args[3])) {
-				level = get_log_level(args[3]);
-				if (level < 0) {
+				logsrv->level = get_log_level(args[3]);
+				if (logsrv->level < 0) {
 					Alert("parsing [%s:%d] : unknown optional log level '%s'\n", file, linenum, args[3]);
-					exit(1);
+					err_code |= ERR_ALERT | ERR_FATAL;
+					goto out;
+
 				}
 			}
 
-			minlvl = 0; /* limit syslog level to this level (emerg) */
+			logsrv->minlvl = 0; /* limit syslog level to this level (emerg) */
 			if (*(args[4])) {
-				minlvl = get_log_level(args[4]);
-				if (level < 0) {
+				logsrv->minlvl = get_log_level(args[4]);
+				if (logsrv->level < 0) {
 					Alert("parsing [%s:%d] : unknown optional minimum log level '%s'\n", file, linenum, args[4]);
-					exit(1);
+					err_code |= ERR_ALERT | ERR_FATAL;
+					goto out;
+
 				}
 			}
 
@@ -4547,7 +4590,7 @@ stats_error_parsing:
 					err_code |= ERR_ALERT | ERR_FATAL;
 					goto out;
 				}
-				logsrv.addr = *sk;
+				logsrv->addr = *sk;
 			} else {
 				struct sockaddr_storage *sk = str2sa(args[1]);
 				if (!sk) {
@@ -4555,28 +4598,12 @@ stats_error_parsing:
 					err_code |= ERR_ALERT | ERR_FATAL;
 					goto out;
 				}
-				logsrv.addr = *sk;
-				if (!get_host_port(&logsrv.addr))
-					set_host_port(&logsrv.addr, SYSLOG_PORT);
+				logsrv->addr = *sk;
+				if (!get_host_port(&logsrv->addr))
+					set_host_port(&logsrv->addr, SYSLOG_PORT);
 			}
-	    
-			if (curproxy->logfac1 == -1) {
-				curproxy->logsrv1 = logsrv;
-				curproxy->logfac1 = facility;
-				curproxy->loglev1 = level;
-				curproxy->minlvl1 = minlvl;
-			}
-			else if (curproxy->logfac2 == -1) {
-				curproxy->logsrv2 = logsrv;
-				curproxy->logfac2 = facility;
-				curproxy->loglev2 = level;
-				curproxy->minlvl2 = minlvl;
-			}
-			else {
-				Alert("parsing [%s:%d] : too many syslog servers\n", file, linenum);
-				err_code |= ERR_ALERT | ERR_FATAL;
-				goto out;
-			}
+
+			LIST_ADDQ(&curproxy->logsrvs, &logsrv->list);
 		}
 		else {
 			Alert("parsing [%s:%d] : 'log' expects either <address[:port]> and <facility> or 'global' as arguments.\n",
@@ -5422,9 +5449,14 @@ int readcfgfile(const char *file)
 
 		/* check for keyword modifiers "no" and "default" */
 		if (!strcmp(args[0], "no")) {
+			char *tmp;
+
 			kwm = KWM_NO;
+			tmp = args[0];
 			for (arg=0; *args[arg+1]; arg++)
 				args[arg] = args[arg+1];		// shift args after inversion
+			*tmp = '\0'; 					// fix the next arg to \0
+			args[arg] = tmp;
 		}
 		else if (!strcmp(args[0], "default")) {
 			kwm = KWM_DEF;
@@ -5432,8 +5464,9 @@ int readcfgfile(const char *file)
 				args[arg] = args[arg+1];		// shift args after inversion
 		}
 
-		if (kwm != KWM_STD && strcmp(args[0], "option") != 0) {
-			Alert("parsing [%s:%d]: negation/default currently supported only for options.\n", file, linenum);
+		if (kwm != KWM_STD && strcmp(args[0], "option") != 0 && 	\
+		     strcmp(args[0], "log") != 0) {
+			Alert("parsing [%s:%d]: negation/default currently supported only for options and log.\n", file, linenum);
 			err_code |= ERR_ALERT | ERR_FATAL;
 		}
 
@@ -5879,11 +5912,15 @@ int check_config_validity()
 			if (!curpeers) {
 				Alert("Proxy '%s': unable to find sync peers '%s'.\n",
 				      curproxy->id, curproxy->table.peers.name);
+				free((void *)curproxy->table.peers.name);
+				curproxy->table.peers.p = NULL;
 				cfgerr++;
 			}
 			else if (!curpeers->peers_fe) {
 				Alert("Proxy '%s': unable to find local peer '%s' in peers section '%s'.\n",
 				      curproxy->id, localpeer, curpeers->id);
+				free((void *)curproxy->table.peers.name);
+				curproxy->table.peers.p = NULL;
 				cfgerr++;
 			}
 		}
@@ -5995,10 +6032,6 @@ out_uri_auth_compat:
 							     curproxy->nb_rsp_cap * sizeof(char *),
 							     MEM_F_SHARED);
 
-		curproxy->hdr_idx_pool = create_pool("hdr_idx",
-						     MAX_HTTP_HDR * sizeof(struct hdr_idx_elem),
-						     MEM_F_SHARED);
-
 		/* first, we will invert the servers list order */
 		newsrv = NULL;
 		while (curproxy->srv) {
@@ -6067,7 +6100,7 @@ out_uri_auth_compat:
 			curproxy->to_log &= ~LW_BYTES;
 
 		if ((curproxy->mode == PR_MODE_TCP || curproxy->mode == PR_MODE_HTTP) &&
-		    (curproxy->cap & PR_CAP_FE) && curproxy->to_log && curproxy->logfac1 < 0) {
+		    (curproxy->cap & PR_CAP_FE) && curproxy->to_log && LIST_ISEMPTY(&curproxy->logsrvs)) {
 			Warning("config : log format ignored for %s '%s' since it has no log address.\n",
 				proxy_type_str(curproxy), curproxy->id);
 			err_code |= ERR_WARN;
@@ -6140,10 +6173,16 @@ out_uri_auth_compat:
 		 */
 		newsrv = curproxy->srv;
 		while (newsrv != NULL) {
-			if ((curproxy->mode != PR_MODE_HTTP) && (newsrv->rdr_len || newsrv->cklen)) {
+			if ((curproxy->mode != PR_MODE_HTTP) && newsrv->rdr_len) {
 				Alert("config : %s '%s' : server cannot have cookie or redirect prefix in non-HTTP mode.\n",
 				      proxy_type_str(curproxy), curproxy->id);
 				cfgerr++;
+			}
+
+			if ((curproxy->mode != PR_MODE_HTTP) && newsrv->cklen) {
+				Warning("config : %s '%s' : ignoring cookie for server '%s' as HTTP mode is disabled.\n",
+				        proxy_type_str(curproxy), curproxy->id, newsrv->id);
+				err_code |= ERR_WARN;
 			}
 
 #if defined(CONFIG_HAP_CTTPROXY) || defined(CONFIG_HAP_LINUX_TPROXY)
@@ -6230,7 +6269,7 @@ out_uri_auth_compat:
 					goto next_srv;
 				}
 
-				newsrv->tracked = srv;
+				newsrv->track = srv;
 				newsrv->tracknext = srv->tracknext;
 				srv->tracknext = newsrv;
 
@@ -6601,6 +6640,13 @@ out_uri_auth_compat:
 			*last = curpeers;
 		}
 	}
+
+	if (!global.tune.max_http_hdr)
+		global.tune.max_http_hdr = MAX_HTTP_HDR;
+
+	pool2_hdr_idx = create_pool("hdr_idx",
+				    global.tune.max_http_hdr * sizeof(struct hdr_idx_elem),
+				    MEM_F_SHARED);
 
 	if (cfgerr > 0)
 		err_code |= ERR_ALERT | ERR_FATAL;
