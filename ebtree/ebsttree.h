@@ -1,21 +1,21 @@
 /*
  * Elastic Binary Trees - macros to manipulate String data nodes.
- * Version 6.0.5
+ * Version 6.0.6
  * (C) 2002-2011 - Willy Tarreau <w@1wt.eu>
  *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
+ * This library is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Lesser General Public
+ * License as published by the Free Software Foundation, version 2.1
+ * exclusively.
  *
- * This program is distributed in the hope that it will be useful,
+ * This library is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * Lesser General Public License for more details.
  *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
+ * You should have received a copy of the GNU Lesser General Public
+ * License along with this library; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
  */
 
 /* These functions and macros rely on Multi-Byte nodes */
@@ -110,6 +110,14 @@ static forceinline struct ebmb_node *__ebst_lookup(struct eb_root *root, const v
 				if (eb_gettag(root->b[EB_RGHT]))
 					return node;
 			}
+			/* if the bit is larger than the node's, we must bound it
+			 * because we might have compared too many bytes with an
+			 * inappropriate leaf. For a test, build a tree from "0",
+			 * "WW", "W", "S" inserted in this exact sequence and lookup
+			 * "W" => "S" is returned without this assignment.
+			 */
+			else
+				bit = node_bit;
 		}
 
 		troot = node->node.branches.b[(((unsigned char*)x)[node_bit >> 3] >>
@@ -128,7 +136,7 @@ __ebst_insert(struct eb_root *root, struct ebmb_node *new)
 	struct ebmb_node *old;
 	unsigned int side;
 	eb_troot_t *troot;
-	eb_troot_t *root_right = root;
+	eb_troot_t *root_right;
 	int diff;
 	int bit;
 	int old_node_bit;

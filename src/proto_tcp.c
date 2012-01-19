@@ -146,6 +146,9 @@ int tcp_bind_socket(int fd, int flags, struct sockaddr_storage *local, struct so
 			if (flags & 2)
 				((struct sockaddr_in6 *)&bind_addr)->sin6_port = ((struct sockaddr_in6 *)remote)->sin6_port;
 			break;
+		default:
+			/* we don't want to try to bind to an unknown address family */
+			foreign_ok = 0;
 		}
 	}
 
@@ -267,7 +270,7 @@ int tcp_connect_server(struct stream_interface *si)
 		setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &one, sizeof(one));
 
 	if (be->options & PR_O_TCP_NOLING)
-		setsockopt(fd, SOL_SOCKET, SO_LINGER, &nolinger, sizeof(struct linger));
+		si->flags |= SI_FL_NOLINGER;
 
 	/* allow specific binding :
 	 * - server-specific at first
@@ -1242,20 +1245,25 @@ static int tcp_parse_tcp_req(char **args, int section_type, struct proxy *curpx,
 /*           All supported ACL keywords must be declared here.          */
 /************************************************************************/
 
-/* set test->ptr to point to the source IPv4/IPv6 address and test->i to the family */
+/* copy the source IPv4/v6 address into temp_pattern */
 static int
 acl_fetch_src(struct proxy *px, struct session *l4, void *l7, int dir,
               struct acl_expr *expr, struct acl_test *test)
 {
-	test->i = l4->si[0].addr.from.ss_family;
-	if (test->i == AF_INET)
-		test->ptr = (char *)&((struct sockaddr_in *)&l4->si[0].addr.from)->sin_addr;
-	else if (test->i == AF_INET6)
-		test->ptr = (char *)&((struct sockaddr_in6 *)(&l4->si[0].addr.from))->sin6_addr;
-	else
+	switch (l4->si[0].addr.from.ss_family) {
+	case AF_INET:
+		temp_pattern.data.ip = ((struct sockaddr_in *)&l4->si[0].addr.from)->sin_addr;
+		temp_pattern.type = PATTERN_TYPE_IP;
+		break;
+	case AF_INET6:
+		temp_pattern.data.ipv6 = ((struct sockaddr_in6 *)(&l4->si[0].addr.from))->sin6_addr;
+		temp_pattern.type = PATTERN_TYPE_IPV6;
+		break;
+	default:
 		return 0;
+	}
 
-	test->flags = ACL_TEST_F_READ_ONLY;
+	test->flags = 0;
 	return 1;
 }
 
@@ -1283,12 +1291,12 @@ pattern_fetch_src6(struct proxy *px, struct session *l4, void *l7, int dir,
 	return 1;
 }
 
-/* set test->i to the connection's source port */
+/* set temp integer to the connection's source port */
 static int
 acl_fetch_sport(struct proxy *px, struct session *l4, void *l7, int dir,
                 struct acl_expr *expr, struct acl_test *test)
 {
-	if (!(test->i = get_host_port(&l4->si[0].addr.from)))
+	if (!(temp_pattern.data.integer = get_host_port(&l4->si[0].addr.from)))
 		return 0;
 
 	test->flags = 0;
@@ -1304,15 +1312,20 @@ acl_fetch_dst(struct proxy *px, struct session *l4, void *l7, int dir,
 	if (!(l4->flags & SN_FRT_ADDR_SET))
 		get_frt_addr(l4);
 
-	test->i = l4->si[0].addr.to.ss_family;
-	if (test->i == AF_INET)
-		test->ptr = (char *)&((struct sockaddr_in *)&l4->si[0].addr.to)->sin_addr;
-	else if (test->i == AF_INET6)
-		test->ptr = (char *)&((struct sockaddr_in6 *)(&l4->si[0].addr.to))->sin6_addr;
-	else
+	switch (l4->si[0].addr.to.ss_family) {
+	case AF_INET:
+		temp_pattern.data.ip = ((struct sockaddr_in *)&l4->si[0].addr.to)->sin_addr;
+		temp_pattern.type = PATTERN_TYPE_IP;
+		break;
+	case AF_INET6:
+		temp_pattern.data.ipv6 = ((struct sockaddr_in6 *)(&l4->si[0].addr.to))->sin6_addr;
+		temp_pattern.type = PATTERN_TYPE_IPV6;
+		break;
+	default:
 		return 0;
+	}
 
-	test->flags = ACL_TEST_F_READ_ONLY;
+	test->flags = 0;
 	return 1;
 }
 
@@ -1347,7 +1360,7 @@ pattern_fetch_dst6(struct proxy *px, struct session *l4, void *l7, int dir,
 	return 1;
 }
 
-/* set test->i to the frontend connexion's destination port */
+/* set temp integer to the frontend connexion's destination port */
 static int
 acl_fetch_dport(struct proxy *px, struct session *l4, void *l7, int dir,
                 struct acl_expr *expr, struct acl_test *test)
@@ -1355,7 +1368,7 @@ acl_fetch_dport(struct proxy *px, struct session *l4, void *l7, int dir,
 	if (!(l4->flags & SN_FRT_ADDR_SET))
 		get_frt_addr(l4);
 
-	if (!(test->i = get_host_port(&l4->si[0].addr.to)))
+	if (!(temp_pattern.data.integer = get_host_port(&l4->si[0].addr.to)))
 		return 0;
 
 	test->flags = 0;
@@ -1567,11 +1580,10 @@ pattern_fetch_rdp_cookie(struct proxy *px, struct session *l4, void *l7, int dir
 	expr.arg_len = arg_p[0].data.str.len;
 
 	ret = acl_fetch_rdp_cookie(px, l4, NULL, ACL_DIR_REQ, &expr, &test);
-	if (ret == 0 || (test.flags & ACL_TEST_F_MAY_CHANGE) || test.len == 0)
+	if (ret == 0 || (test.flags & ACL_TEST_F_MAY_CHANGE) || temp_pattern.data.str.len == 0)
 		return 0;
 
-	/* init chunk as read only */
-	chunk_initlen(&data->str, test.ptr, 0, test.len);
+	data->str = temp_pattern.data.str;
 	return 1;
 }
 

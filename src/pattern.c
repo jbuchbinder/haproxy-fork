@@ -18,7 +18,7 @@
 #include <common/standard.h>
 
 /* static structure used on pattern_process if <p> is NULL*/
-static struct pattern spattern;
+struct pattern temp_pattern = { };
 
 /* trash chunk used for pattern conversions */
 static struct chunk trash_chunk;
@@ -115,14 +115,6 @@ static struct chunk *get_trash_chunk(void)
 	return &trash_chunk;
 }
 
-/*
-* Used to set pattern data from a struct chunk, could be the trash struct chunk
-*/
-static void pattern_data_setstring(union pattern_data *data, struct chunk *c)
-{
-	chunk_initlen(&data->str, c->str, c->size, c->len);
-}
-
 /******************************************************************/
 /*          Pattern casts functions                               */
 /******************************************************************/
@@ -141,7 +133,7 @@ static int c_ip2str(union pattern_data *data)
 		return 0;
 
 	trash->len = strlen(trash->str);
-	pattern_data_setstring(data, trash);
+	data->str = *trash;
 
 	return 1;
 }
@@ -160,8 +152,7 @@ static int c_ipv62str(union pattern_data *data)
 		return 0;
 
 	trash->len = strlen(trash->str);
-	pattern_data_setstring(data, trash);
-
+	data->str = *trash;
 	return 1;
 }
 
@@ -203,9 +194,7 @@ static int c_int2str(union pattern_data *data)
 	trash->size = trash->size - (pos - trash->str);
 	trash->str = pos;
 	trash->len = strlen(pos);
-
-	pattern_data_setstring(data, trash);
-
+	data->str = *trash;
 	return 1;
 }
 
@@ -215,9 +204,7 @@ static int c_datadup(union pattern_data *data)
 
 	trash->len = data->str.len < trash->size ? data->str.len : trash->size;
 	memcpy(trash->str, data->str.str, trash->len);
-
-	pattern_data_setstring(data, trash);
-
+	data->str = *trash;
 	return 1;
 }
 
@@ -469,7 +456,7 @@ struct pattern *pattern_process(struct proxy *px, struct session *l4, void *l7, 
 	struct pattern_conv_expr *conv_expr;
 
 	if (p == NULL)
-		p = &spattern;
+		p = &temp_pattern;
 
 	if (!expr->fetch->process(px, l4, l7, dir, expr->arg_p, expr->arg_i, &p->data))
 		return NULL;

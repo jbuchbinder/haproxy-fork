@@ -413,7 +413,9 @@ struct server *get_server_rch(struct session *s)
 	expr.arg_len = px->hh_len;
 
 	ret = acl_fetch_rdp_cookie(px, s, NULL, ACL_DIR_REQ, &expr, &test);
-	if (ret == 0 || (test.flags & ACL_TEST_F_MAY_CHANGE) || test.len == 0)
+	len = temp_pattern.data.str.len;
+
+	if (ret == 0 || (test.flags & ACL_TEST_F_MAY_CHANGE) || len == 0)
 		return NULL;
 
 	/* note: we won't hash if there's only one server left */
@@ -423,8 +425,7 @@ struct server *get_server_rch(struct session *s)
 	/* Found a the hh_name in the headers.
 	 * we will compute the hash based on this value ctx.val.
 	 */
-	len = test.len;
-	p = (char *)test.ptr;
+	p = temp_pattern.data.str.str;
 	while (len) {
 		hash = *p + (hash << 6) + (hash << 16) - hash;
 		len--;
@@ -880,14 +881,19 @@ static void assign_tproxy_address(struct session *s)
 			break;
 		case SRV_TPROXY_DYN:
 			if (srv->bind_hdr_occ) {
+				char *vptr;
+				int vlen;
+
 				/* bind to the IP in a header */
+				((struct sockaddr_in *)&s->req->cons->addr.from)->sin_family = AF_INET;
 				((struct sockaddr_in *)&s->req->cons->addr.from)->sin_port = 0;
-				((struct sockaddr_in *)&s->req->cons->addr.from)->sin_addr.s_addr =
-					htonl(get_ip_from_hdr2(&s->txn.req,
-					                       srv->bind_hdr_name,
-					                       srv->bind_hdr_len,
-					                       &s->txn.hdr_idx,
-					                       srv->bind_hdr_occ));
+				((struct sockaddr_in *)&s->req->cons->addr.from)->sin_addr.s_addr = 0;
+
+				if (http_get_hdr(&s->txn.req, srv->bind_hdr_name, srv->bind_hdr_len,
+						 &s->txn.hdr_idx, srv->bind_hdr_occ, NULL, &vptr, &vlen)) {
+					((struct sockaddr_in *)&s->req->cons->addr.from)->sin_addr.s_addr =
+						htonl(inetaddr_host_lim(vptr, vptr + vlen));
+				}
 			}
 			break;
 		default:
@@ -906,14 +912,19 @@ static void assign_tproxy_address(struct session *s)
 			break;
 		case PR_O_TPXY_DYN:
 			if (s->be->bind_hdr_occ) {
+				char *vptr;
+				int vlen;
+
 				/* bind to the IP in a header */
+				((struct sockaddr_in *)&s->req->cons->addr.from)->sin_family = AF_INET;
 				((struct sockaddr_in *)&s->req->cons->addr.from)->sin_port = 0;
-				((struct sockaddr_in *)&s->req->cons->addr.from)->sin_addr.s_addr =
-					htonl(get_ip_from_hdr2(&s->txn.req,
-							       s->be->bind_hdr_name,
-							       s->be->bind_hdr_len,
-							       &s->txn.hdr_idx,
-							       s->be->bind_hdr_occ));
+				((struct sockaddr_in *)&s->req->cons->addr.from)->sin_addr.s_addr = 0;
+
+				if (http_get_hdr(&s->txn.req, s->be->bind_hdr_name, s->be->bind_hdr_len,
+						 &s->txn.hdr_idx, s->be->bind_hdr_occ, NULL, &vptr, &vlen)) {
+					((struct sockaddr_in *)&s->req->cons->addr.from)->sin_addr.s_addr =
+						htonl(inetaddr_host_lim(vptr, vptr + vlen));
+				}
 			}
 			break;
 		default:
@@ -1110,14 +1121,14 @@ int tcp_persist_rdp_cookie(struct session *s, struct buffer *req, int an_bit)
 	expr.arg_len = s->be->rdp_cookie_len;
 
 	ret = acl_fetch_rdp_cookie(px, s, NULL, ACL_DIR_REQ, &expr, &test);
-	if (ret == 0 || (test.flags & ACL_TEST_F_MAY_CHANGE) || test.len == 0)
+	if (ret == 0 || (test.flags & ACL_TEST_F_MAY_CHANGE) || temp_pattern.data.str.len == 0)
 		goto no_cookie;
 
 	memset(&addr, 0, sizeof(addr));
 	addr.sin_family = AF_INET;
 
-	/* Considering an rdp cookie detected using acl, test.ptr ended with <cr><lf> and should return */
-	addr.sin_addr.s_addr = strtoul(test.ptr, &p, 10);
+	/* Considering an rdp cookie detected using acl, str ended with <cr><lf> and should return */
+	addr.sin_addr.s_addr = strtoul(temp_pattern.data.str.str, &p, 10);
 	if (*p != '.')
 		goto no_cookie;
 	p++;
@@ -1338,7 +1349,7 @@ int backend_parse_balance(const char **args, char *err, int errlen, struct proxy
 /*             All supported keywords must be declared here.            */
 /************************************************************************/
 
-/* set test->i to the number of enabled servers on the proxy */
+/* set temp integer to the number of enabled servers on the proxy */
 static int
 acl_fetch_nbsrv(struct proxy *px, struct session *l4, void *l7, int dir,
                 struct acl_expr *expr, struct acl_test *test)
@@ -1354,11 +1365,11 @@ acl_fetch_nbsrv(struct proxy *px, struct session *l4, void *l7, int dir,
 		return 0;
 
 	if (px->srv_act)
-		test->i = px->srv_act;
+		temp_pattern.data.integer = px->srv_act;
 	else if (px->lbprm.fbck)
-		test->i = 1;
+		temp_pattern.data.integer = 1;
 	else
-		test->i = px->srv_bck;
+		temp_pattern.data.integer = px->srv_bck;
 
 	return 1;
 }
@@ -1381,7 +1392,7 @@ acl_fetch_srv_is_up(struct proxy *px, struct session *l4, void *l7, int dir,
 	return 1;
 }
 
-/* set test->i to the number of enabled servers on the proxy */
+/* set temp integer to the number of enabled servers on the proxy */
 static int
 acl_fetch_connslots(struct proxy *px, struct session *l4, void *l7, int dir,
 		    struct acl_expr *expr, struct acl_test *test)
@@ -1397,7 +1408,7 @@ acl_fetch_connslots(struct proxy *px, struct session *l4, void *l7, int dir,
 	if (!px)
 		return 0;
 
-	test->i = 0;
+	temp_pattern.data.integer = 0;
 	iterator = px->srv;
 	while (iterator) {
 		if ((iterator->state & SRV_RUNNING) == 0) {
@@ -1405,31 +1416,31 @@ acl_fetch_connslots(struct proxy *px, struct session *l4, void *l7, int dir,
 			continue;
 		}
 		if (iterator->maxconn == 0 || iterator->maxqueue == 0) {
-			test->i = -1;
+			/* configuration is stupid */
+			temp_pattern.data.integer = -1;
 			return 1;
 		}
 
-		test->i += (iterator->maxconn - iterator->cur_sess)
-			+  (iterator->maxqueue - iterator->nbpend);
+		temp_pattern.data.integer += (iterator->maxconn - iterator->cur_sess)
+		                          +  (iterator->maxqueue - iterator->nbpend);
 		iterator = iterator->next;
 	}
 
 	return 1;
 }
 
-/* set test->i to the id of the backend */
+/* set temp integer to the id of the backend */
 static int
 acl_fetch_be_id(struct proxy *px, struct session *l4, void *l7, int dir,
                 struct acl_expr *expr, struct acl_test *test) {
 
 	test->flags = ACL_TEST_F_READ_ONLY;
-
-	test->i = l4->be->uuid;
+	temp_pattern.data.integer = l4->be->uuid;
 
 	return 1;
 }
 
-/* set test->i to the id of the server */
+/* set temp integer to the id of the server */
 static int
 acl_fetch_srv_id(struct proxy *px, struct session *l4, void *l7, int dir,
                 struct acl_expr *expr, struct acl_test *test) {
@@ -1438,13 +1449,12 @@ acl_fetch_srv_id(struct proxy *px, struct session *l4, void *l7, int dir,
 		return 0;
 
 	test->flags = ACL_TEST_F_READ_ONLY;
-
-	test->i = target_srv(&l4->target)->puid;
+	temp_pattern.data.integer = target_srv(&l4->target)->puid;
 
 	return 1;
 }
 
-/* set test->i to the number of connections per second reaching the backend */
+/* set temp integer to the number of connections per second reaching the backend */
 static int
 acl_fetch_be_sess_rate(struct proxy *px, struct session *l4, void *l7, int dir,
                        struct acl_expr *expr, struct acl_test *test)
@@ -1459,11 +1469,11 @@ acl_fetch_be_sess_rate(struct proxy *px, struct session *l4, void *l7, int dir,
 	if (!px)
 		return 0;
 
-	test->i = read_freq_ctr(&px->be_sess_per_sec);
+	temp_pattern.data.integer = read_freq_ctr(&px->be_sess_per_sec);
 	return 1;
 }
 
-/* set test->i to the number of concurrent connections on the backend */
+/* set temp integer to the number of concurrent connections on the backend */
 static int
 acl_fetch_be_conn(struct proxy *px, struct session *l4, void *l7, int dir,
 		  struct acl_expr *expr, struct acl_test *test)
@@ -1478,11 +1488,11 @@ acl_fetch_be_conn(struct proxy *px, struct session *l4, void *l7, int dir,
 	if (!px)
 		return 0;
 
-	test->i = px->beconn;
+	temp_pattern.data.integer = px->beconn;
 	return 1;
 }
 
-/* set test->i to the total number of queued connections on the backend */
+/* set temp integer to the total number of queued connections on the backend */
 static int
 acl_fetch_queue_size(struct proxy *px, struct session *l4, void *l7, int dir,
 		   struct acl_expr *expr, struct acl_test *test)
@@ -1497,11 +1507,11 @@ acl_fetch_queue_size(struct proxy *px, struct session *l4, void *l7, int dir,
 	if (!px)
 		return 0;
 
-	test->i = px->totpend;
+	temp_pattern.data.integer = px->totpend;
 	return 1;
 }
 
-/* set test->i to the total number of queued connections on the backend divided
+/* set temp integer to the total number of queued connections on the backend divided
  * by the number of running servers and rounded up. If there is no running
  * server, we return twice the total, just as if we had half a running server.
  * This is more or less correct anyway, since we expect the last server to come
@@ -1531,21 +1541,21 @@ acl_fetch_avg_queue_size(struct proxy *px, struct session *l4, void *l7, int dir
 		nbsrv = px->srv_bck;
 
 	if (nbsrv > 0)
-		test->i = (px->totpend + nbsrv - 1) / nbsrv;
+		temp_pattern.data.integer = (px->totpend + nbsrv - 1) / nbsrv;
 	else
-		test->i = px->totpend * 2;
+		temp_pattern.data.integer = px->totpend * 2;
 
 	return 1;
 }
 
-/* set test->i to the number of concurrent connections on the server in the backend */
+/* set temp integer to the number of concurrent connections on the server in the backend */
 static int
 acl_fetch_srv_conn(struct proxy *px, struct session *l4, void *l7, int dir,
 		  struct acl_expr *expr, struct acl_test *test)
 {
 	struct server *srv = expr->arg.srv;
 
-	test->i = srv->cur_sess;
+	temp_pattern.data.integer = srv->cur_sess;
 	return 1;
 }
 

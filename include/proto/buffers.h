@@ -45,7 +45,6 @@ int buffer_put_block(struct buffer *buf, const char *str, int len);
 int buffer_put_char(struct buffer *buf, char c);
 int buffer_get_line(struct buffer *buf, char *str, int len);
 int buffer_get_block(struct buffer *buf, char *blk, int len, int offset);
-int buffer_replace(struct buffer *b, char *pos, char *end, const char *str);
 int buffer_replace2(struct buffer *b, char *pos, char *end, const char *str, int len);
 int buffer_insert_line2(struct buffer *b, char *pos, const char *str, int len);
 void buffer_dump(FILE *o, struct buffer *b, int from, int to);
@@ -103,11 +102,13 @@ static inline int buffer_total_space(const struct buffer *buf)
 }
 
 /* Return the maximum amount of bytes that can be written into the buffer,
- * excluding the reserved space, which is preserved.
+ * excluding the reserved space, which is preserved. 0 may be returned if
+ * the reserved space was already reached or used.
  */
 static inline int buffer_total_space_res(const struct buffer *buf)
 {
-	return buffer_max_len(buf) - buf->l;
+	int len = buffer_max_len(buf) - buf->l;
+	return len < 0 ? 0 : len;
 }
 
 /* Returns the number of contiguous bytes between <start> and <start>+<count>,
@@ -184,12 +185,14 @@ static inline int buffer_contig_space_with_res(struct buffer *buf, int res)
 /* Normalizes a pointer which is supposed to be relative to the beginning of a
  * buffer, so that wrapping is correctly handled. The intent is to use this
  * when increasing a pointer. Note that the wrapping test is only performed
- * once, so the original pointer must be between ->data and ->data+2*size - 1,
+ * once, so the original pointer must be between ->data-size and ->data+2*size-1,
  * otherwise an invalid pointer might be returned.
  */
 static inline char *buffer_pointer(const struct buffer *buf, char *ptr)
 {
-	if (ptr - buf->size >= buf->data)
+	if (ptr < buf->data)
+		ptr += buf->size;
+	else if (ptr - buf->size >= buf->data)
 		ptr -= buf->size;
 	return ptr;
 }
@@ -569,6 +572,19 @@ static inline int buffer_feed(struct buffer *buf, const char *str)
 		return 1;
 	/* failure */
 	return -2;
+}
+
+
+/* This function writes the string <str> at position <pos> which must be in
+ * buffer <b>, and moves <end> just after the end of <str>. <b>'s parameters
+ * (l, r, lr) are updated to be valid after the shift. the shift value
+ * (positive or negative) is returned. If there's no space left, the move is
+ * not done. The function does not adjust ->send_max nor BF_OUT_EMPTY because
+ * it does not make sense to use it on data scheduled to be sent.
+ */
+static inline int buffer_replace(struct buffer *b, char *pos, char *end, const char *str)
+{
+	return buffer_replace2(b, pos, end, str, strlen(str));
 }
 
 /*

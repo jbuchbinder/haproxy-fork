@@ -20,6 +20,8 @@
 #include <syslog.h>
 #include <time.h>
 
+#include <netinet/tcp.h>
+
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -2587,6 +2589,15 @@ int http_wait_for_request(struct session *s, struct buffer *req, int an_bit)
 		buffer_dont_connect(req);
 		req->flags |= BF_READ_DONTWAIT; /* try to get back here ASAP */
 		s->rep->flags &= ~BF_EXPECT_MORE; /* speed up sending a previous response */
+#ifdef TCP_QUICKACK
+		if (s->listener->options & LI_O_NOQUICKACK) {
+			/* We need more data, we have to re-enable quick-ack in case we
+			 * previously disabled it, otherwise we might cause the client
+			 * to delay next data.
+			 */
+			setsockopt(s->si[0].fd, IPPROTO_TCP, TCP_QUICKACK, &one, sizeof(one));
+		}
+#endif
 
 		if ((msg->msg_state != HTTP_MSG_RQBEFORE) && (txn->flags & TX_WAIT_NEXT_RQ)) {
 			/* If the client starts to talk, let's fall back to
@@ -3697,8 +3708,20 @@ int http_process_request(struct session *s, struct buffer *req, int an_bit)
 		req->analysers |= AN_REQ_HTTP_BODY;
 	}
 
-	if (txn->flags & TX_REQ_XFER_LEN)
+	if (txn->flags & TX_REQ_XFER_LEN) {
 		req->analysers |= AN_REQ_HTTP_XFER_BODY;
+#ifdef TCP_QUICKACK
+		/* We expect some data from the client. Unless we know for sure
+		 * we already have a full request, we have to re-enable quick-ack
+		 * in case we previously disabled it, otherwise we might cause
+		 * the client to delay further data.
+		 */
+		if ((s->listener->options & LI_O_NOQUICKACK) &&
+		    ((txn->flags & TX_REQ_TE_CHNK) ||
+		     (msg->body_len > req->l - txn->req.eoh - 2)))
+			setsockopt(s->si[0].fd, IPPROTO_TCP, TCP_QUICKACK, &one, sizeof(one));
+#endif
+	}
 
 	/*************************************************************
 	 * OK, that's finished for the headers. We have done what we *
@@ -3911,6 +3934,34 @@ int http_process_request_body(struct session *s, struct buffer *req, int an_bit)
 	s->fe->fe_counters.failed_req++;
 	if (s->listener->counters)
 		s->listener->counters->failed_req++;
+	return 0;
+}
+
+int http_send_name_header(struct http_txn *txn, struct http_msg *msg, struct buffer *buf, struct proxy* be, const char* srv_name) {
+
+	struct hdr_ctx ctx;
+
+	ctx.idx = 0;
+
+	char *hdr_name = be->server_id_hdr_name;
+	int hdr_name_len = be->server_id_hdr_len;
+
+	char *hdr_val;
+
+	while (http_find_header2(hdr_name, hdr_name_len, msg->sol, &txn->hdr_idx, &ctx)) {
+		/* remove any existing values from the header */
+	        http_remove_header2(msg, buf, &txn->hdr_idx, &ctx);
+	}
+
+	/* Add the new header requested with the server value */
+	hdr_val = trash;
+	memcpy(hdr_val, hdr_name, hdr_name_len);
+	hdr_val += hdr_name_len;
+	*hdr_val++ = ':';
+	*hdr_val++ = ' ';
+	hdr_val += strlcpy2(hdr_val, srv_name, trash + sizeof(trash) - hdr_val);
+	http_header_add_tail2(buf, msg, &txn->hdr_idx, trash, hdr_val - trash);
+
 	return 0;
 }
 
@@ -7632,45 +7683,53 @@ void http_capture_bad_message(struct error_snapshot *es, struct session *s,
 	es->ev_id = error_snapshot_id++;
 }
 
-/* return the IP address pointed to by occurrence <occ> of header <hname> in
- * HTTP message <msg> indexed in <idx>. If <occ> is strictly positive, the
- * occurrence number corresponding to this value is returned. If <occ> is
- * strictly negative, the occurrence number before the end corresponding to
- * this value is returned. If <occ> is null, any value is returned, so it is
- * not recommended to use it that way. Negative occurrences are limited to
- * a small value because it is required to keep them in memory while scanning.
- * IP address 0.0.0.0 is returned if no match is found.
+/* Return in <vptr> and <vlen> the pointer and length of occurrence <occ> of
+ * header whose name is <hname> of length <hlen>. If <ctx> is null, lookup is
+ * performed over the whole headers. Otherwise it must contain a valid header
+ * context, initialised with ctx->idx=0 for the first lookup in a series. If
+ * <occ> is positive or null, occurrence #occ from the beginning (or last ctx)
+ * is returned. Occ #0 and #1 are equivalent. If <occ> is negative (and no less
+ * than -MAX_HDR_HISTORY), the occurrence is counted from the last one which is
+ * -1.
+ * The return value is 0 if nothing was found, or non-zero otherwise.
  */
-unsigned int get_ip_from_hdr2(struct http_msg *msg, const char *hname, int hlen, struct hdr_idx *idx, int occ)
+unsigned int http_get_hdr(struct http_msg *msg, const char *hname, int hlen,
+			  struct hdr_idx *idx, int occ,
+			  struct hdr_ctx *ctx, char **vptr, int *vlen)
 {
-	struct hdr_ctx ctx;
-	unsigned int hdr_hist[MAX_HDR_HISTORY];
+	struct hdr_ctx local_ctx;
+	char *ptr_hist[MAX_HDR_HISTORY];
+	int len_hist[MAX_HDR_HISTORY];
 	unsigned int hist_ptr;
-	int found = 0;
+	int found;
 
-	ctx.idx = 0;
+	if (!ctx) {
+		local_ctx.idx = 0;
+		ctx = &local_ctx;
+	}
+
 	if (occ >= 0) {
-		while (http_find_header2(hname, hlen, msg->sol, idx, &ctx)) {
+		/* search from the beginning */
+		while (http_find_header2(hname, hlen, msg->sol, idx, ctx)) {
 			occ--;
 			if (occ <= 0) {
-				found = 1;
-				break;
+				*vptr = ctx->line + ctx->val;
+				*vlen = ctx->vlen;
+				return 1;
 			}
 		}
-		if (!found)
-			return 0;
-		return inetaddr_host_lim(ctx.line+ctx.val, ctx.line+ctx.val+ctx.vlen);
+		return 0;
 	}
 
 	/* negative occurrence, we scan all the list then walk back */
 	if (-occ > MAX_HDR_HISTORY)
 		return 0;
 
-	hist_ptr = 0;
-	hdr_hist[hist_ptr] = 0;
-	while (http_find_header2(hname, hlen, msg->sol, idx, &ctx)) {
-		hdr_hist[hist_ptr++] = inetaddr_host_lim(ctx.line+ctx.val, ctx.line+ctx.val+ctx.vlen);
-		if (hist_ptr >= MAX_HDR_HISTORY)
+	found = hist_ptr = 0;
+	while (http_find_header2(hname, hlen, msg->sol, idx, ctx)) {
+		ptr_hist[hist_ptr] = ctx->line + ctx->val;
+		len_hist[hist_ptr] = ctx->vlen;
+		if (++hist_ptr >= MAX_HDR_HISTORY)
 			hist_ptr = 0;
 		found++;
 	}
@@ -7682,7 +7741,9 @@ unsigned int get_ip_from_hdr2(struct http_msg *msg, const char *hname, int hlen,
 	hist_ptr += occ;
 	if (hist_ptr >= MAX_HDR_HISTORY)
 		hist_ptr -= MAX_HDR_HISTORY;
-	return hdr_hist[hist_ptr];
+	*vptr = ptr_hist[hist_ptr];
+	*vlen = len_hist[hist_ptr];
+	return 1;
 }
 
 /*
@@ -7919,6 +7980,14 @@ static int acl_parse_meth(const char **text, struct acl_pattern *pattern, int *o
 	return 1;
 }
 
+/* This function fetches the method of current HTTP request and stores
+ * it in the global pattern struct as a chunk. There are two possibilities :
+ *   - if the method is known (not HTTP_METH_OTHER), its identifier is stored
+ *     in <len> and <ptr> is NULL ;
+ *   - if the method is unknown (HTTP_METH_OTHER), <ptr> points to the text and
+ *     <len> to its length.
+ * This is intended to be used with acl_match_meth() only.
+ */
 static int
 acl_fetch_meth(struct proxy *px, struct session *l4, void *l7, int dir,
                struct acl_expr *expr, struct acl_test *test)
@@ -7933,35 +8002,43 @@ acl_fetch_meth(struct proxy *px, struct session *l4, void *l7, int dir,
 		return 0;
 
 	meth = txn->meth;
-	test->i = meth;
+	temp_pattern.data.str.len = meth;
+	temp_pattern.data.str.str = NULL;
 	if (meth == HTTP_METH_OTHER) {
 		if (txn->rsp.msg_state != HTTP_MSG_RPBEFORE)
 			/* ensure the indexes are not affected */
 			return 0;
-		test->len = txn->req.sl.rq.m_l;
-		test->ptr = txn->req.sol;
+		temp_pattern.data.str.len = txn->req.sl.rq.m_l;
+		temp_pattern.data.str.str = txn->req.sol;
 	}
 	test->flags = ACL_TEST_F_READ_ONLY | ACL_TEST_F_VOL_1ST;
 	return 1;
 }
 
+/* See above how the method is stored in the global pattern */
 static int acl_match_meth(struct acl_test *test, struct acl_pattern *pattern)
 {
 	int icase;
 
-	if (test->i != pattern->val.i)
+
+	if (temp_pattern.data.str.str == NULL) {
+		/* well-known method */
+		if (temp_pattern.data.str.len == pattern->val.i)
+			return ACL_PAT_PASS;
+		return ACL_PAT_FAIL;
+	}
+
+	/* Uncommon method, only HTTP_METH_OTHER is accepted now */
+	if (pattern->val.i != HTTP_METH_OTHER)
 		return ACL_PAT_FAIL;
 
-	if (test->i != HTTP_METH_OTHER)
-		return ACL_PAT_PASS;
-
 	/* Other method, we must compare the strings */
-	if (pattern->len != test->len)
+	if (pattern->len != temp_pattern.data.str.len)
 		return ACL_PAT_FAIL;
 
 	icase = pattern->flags & ACL_PAT_F_IGNORE_CASE;
-	if ((icase && strncasecmp(pattern->ptr.str, test->ptr, test->len) != 0) ||
-	    (!icase && strncmp(pattern->ptr.str, test->ptr, test->len) != 0))
+	if ((icase && strncasecmp(pattern->ptr.str, temp_pattern.data.str.str, temp_pattern.data.str.len) != 0) ||
+	    (!icase && strncmp(pattern->ptr.str, temp_pattern.data.str.str, temp_pattern.data.str.len) != 0))
 		return ACL_PAT_FAIL;
 	return ACL_PAT_PASS;
 }
@@ -7999,8 +8076,8 @@ acl_fetch_rqver(struct proxy *px, struct session *l4, void *l7, int dir,
 	if (len <= 0)
 		return 0;
 
-	test->ptr = ptr;
-	test->len = len;
+	temp_pattern.data.str.str = ptr;
+	temp_pattern.data.str.len = len;
 
 	test->flags = ACL_TEST_F_READ_ONLY | ACL_TEST_F_VOL_1ST;
 	return 1;
@@ -8027,8 +8104,8 @@ acl_fetch_stver(struct proxy *px, struct session *l4, void *l7, int dir,
 	if (len <= 0)
 		return 0;
 
-	test->ptr = ptr;
-	test->len = len;
+	temp_pattern.data.str.str = ptr;
+	temp_pattern.data.str.len = len;
 
 	test->flags = ACL_TEST_F_READ_ONLY | ACL_TEST_F_VOL_1ST;
 	return 1;
@@ -8052,7 +8129,7 @@ acl_fetch_stcode(struct proxy *px, struct session *l4, void *l7, int dir,
 	len = txn->rsp.sl.st.c_l;
 	ptr = txn->rsp.sol + txn->rsp.sl.st.c;
 
-	test->i = __strl2ui(ptr, len);
+	temp_pattern.data.integer = __strl2ui(ptr, len);
 	test->flags = ACL_TEST_F_VOL_1ST;
 	return 1;
 }
@@ -8074,8 +8151,8 @@ acl_fetch_url(struct proxy *px, struct session *l4, void *l7, int dir,
 		/* ensure the indexes are not affected */
 		return 0;
 
-	test->len = txn->req.sl.rq.u_l;
-	test->ptr = txn->req.sol + txn->req.sl.rq.u;
+	temp_pattern.data.str.len = txn->req.sl.rq.u_l;
+	temp_pattern.data.str.str = txn->req.sol + txn->req.sl.rq.u;
 
 	/* we do not need to set READ_ONLY because the data is in a buffer */
 	test->flags = ACL_TEST_F_VOL_1ST;
@@ -8100,8 +8177,10 @@ acl_fetch_url_ip(struct proxy *px, struct session *l4, void *l7, int dir,
 
 	/* Parse HTTP request */
 	url2sa(txn->req.sol + txn->req.sl.rq.u, txn->req.sl.rq.u_l, &l4->req->cons->addr.to);
-	test->ptr = (void *)&((struct sockaddr_in *)&l4->req->cons->addr.to)->sin_addr;
-	test->i = AF_INET;
+	if (((struct sockaddr_in *)&l4->req->cons->addr.to)->sin_family != AF_INET)
+		return 0;
+	temp_pattern.type = PATTERN_TYPE_IP;
+	temp_pattern.data.ip = ((struct sockaddr_in *)&l4->req->cons->addr.to)->sin_addr;
 
 	/*
 	 * If we are parsing url in frontend space, we prepare backend stage
@@ -8110,7 +8189,7 @@ acl_fetch_url_ip(struct proxy *px, struct session *l4, void *l7, int dir,
 	if (px->options & PR_O_HTTP_PROXY)
 		l4->flags |= SN_ADDR_SET;
 
-	test->flags = ACL_TEST_F_READ_ONLY;
+	test->flags = 0;
 	return 1;
 }
 
@@ -8132,7 +8211,7 @@ acl_fetch_url_port(struct proxy *px, struct session *l4, void *l7, int dir,
 
 	/* Same optimization as url_ip */
 	url2sa(txn->req.sol + txn->req.sl.rq.u, txn->req.sl.rq.u_l, &l4->req->cons->addr.to);
-	test->i = ntohs(((struct sockaddr_in *)&l4->req->cons->addr.to)->sin_port);
+	temp_pattern.data.integer = ntohs(((struct sockaddr_in *)&l4->req->cons->addr.to)->sin_port);
 
 	if (px->options & PR_O_HTTP_PROXY)
 		l4->flags |= SN_ADDR_SET;
@@ -8162,8 +8241,9 @@ acl_fetch_hdr(struct proxy *px, struct session *l4, void *l7, char *sol,
 	if (http_find_header2(expr->arg.str, expr->arg_len, sol, idx, ctx)) {
 		test->flags |= ACL_TEST_F_FETCH_MORE;
 		test->flags |= ACL_TEST_F_VOL_HDR;
-		test->len = ctx->vlen;
-		test->ptr = (char *)ctx->line + ctx->val;
+		temp_pattern.data.str.str = (char *)ctx->line + ctx->val;
+		temp_pattern.data.str.len = ctx->vlen;
+
 		return 1;
 	}
 
@@ -8226,7 +8306,7 @@ acl_fetch_hdr_cnt(struct proxy *px, struct session *l4, void *l7, char *sol,
 	while (http_find_header2(expr->arg.str, expr->arg_len, sol, idx, &ctx))
 		cnt++;
 
-	test->i = cnt;
+	temp_pattern.data.integer = cnt;
 	test->flags = ACL_TEST_F_VOL_HDR;
 	return 1;
 }
@@ -8287,7 +8367,7 @@ acl_fetch_hdr_val(struct proxy *px, struct session *l4, void *l7, char *sol,
 	if (http_find_header2(expr->arg.str, expr->arg_len, sol, idx, ctx)) {
 		test->flags |= ACL_TEST_F_FETCH_MORE;
 		test->flags |= ACL_TEST_F_VOL_HDR;
-		test->i = strl2ic((char *)ctx->line + ctx->val, ctx->vlen);
+		temp_pattern.data.integer = strl2ic((char *)ctx->line + ctx->val, ctx->vlen);
 		return 1;
 	}
 
@@ -8348,15 +8428,14 @@ acl_fetch_hdr_ip(struct proxy *px, struct session *l4, void *l7, char *sol,
 		/* search for header from the beginning */
 		ctx->idx = 0;
 
-	if (http_find_header2(expr->arg.str, expr->arg_len, sol, idx, ctx)) {
+	while (http_find_header2(expr->arg.str, expr->arg_len, sol, idx, ctx)) {
 		test->flags |= ACL_TEST_F_FETCH_MORE;
 		test->flags |= ACL_TEST_F_VOL_HDR;
 		/* Same optimization as url_ip */
-		memset(&((struct sockaddr_in *)&l4->req->cons->addr.to)->sin_addr, 0, sizeof(((struct sockaddr_in *)&l4->req->cons->addr.to)->sin_addr));
-		url2ipv4((char *)ctx->line + ctx->val, &((struct sockaddr_in *)&l4->req->cons->addr.to)->sin_addr);
-		test->ptr = (void *)&((struct sockaddr_in *)&l4->req->cons->addr.to)->sin_addr;
-		test->i = AF_INET;
-		return 1;
+		temp_pattern.type = PATTERN_TYPE_IP;
+		if (url2ipv4((char *)ctx->line + ctx->val, &temp_pattern.data.ip))
+			return 1;
+		/* Dods not look like an IP address, let's fetch next one */
 	}
 
 	test->flags &= ~ACL_TEST_F_FETCH_MORE;
@@ -8424,12 +8503,12 @@ acl_fetch_path(struct proxy *px, struct session *l4, void *l7, int dir,
 		return 0;
 
 	/* OK, we got the '/' ! */
-	test->ptr = ptr;
+	temp_pattern.data.str.str = ptr;
 
 	while (ptr < end && *ptr != '?')
 		ptr++;
 
-	test->len = ptr - test->ptr;
+	temp_pattern.data.str.len = ptr - temp_pattern.data.str.str;
 
 	/* we do not need to set READ_ONLY because the data is in a buffer */
 	test->flags = ACL_TEST_F_VOL_1ST;
@@ -8610,19 +8689,15 @@ static struct acl_kw_list acl_kws = {{ },{
 /*     The code below is dedicated to pattern fetching and matching     */
 /************************************************************************/
 
-/* extract the IP address from the last occurrence of specified header. Note
- * that we should normally first extract the string then convert it to IP,
- * but right now we have all the functions to do this seemlessly, and we will
- * be able to change that later without touching the configuration.
- */
+/* Returns the last occurrence of specified header. */
 static int
-pattern_fetch_hdr_ip(struct proxy *px, struct session *l4, void *l7, int dir,
-                     const struct pattern_arg *arg_p, int arg_i, union pattern_data *data)
+pattern_fetch_hdr(struct proxy *px, struct session *l4, void *l7, int dir,
+		  const struct pattern_arg *arg_p, int arg_i, union pattern_data *data)
 {
 	struct http_txn *txn = l7;
 
-	data->ip.s_addr = htonl(get_ip_from_hdr2(&txn->req, arg_p->data.str.str, arg_p->data.str.len, &txn->hdr_idx, -1));
-	return data->ip.s_addr != 0;
+	return http_get_hdr(&txn->req, arg_p->data.str.str, arg_p->data.str.len, &txn->hdr_idx,
+			    -1, NULL, &data->str.str, &data->str.len);
 }
 
 /*
@@ -8914,7 +8989,7 @@ pattern_fetch_set_cookie(struct proxy *px, struct session *l4, void *l7, int dir
 /************************************************************************/
 /* Note: must not be declared <const> as its list will be overwritten */
 static struct pattern_fetch_kw_list pattern_fetch_keywords = {{ },{
-	{ "hdr", pattern_fetch_hdr_ip, pattern_arg_str, PATTERN_TYPE_IP, PATTERN_FETCH_REQ },
+	{ "hdr", pattern_fetch_hdr, pattern_arg_str, PATTERN_TYPE_STRING, PATTERN_FETCH_REQ },
 	{ "url_param", pattern_fetch_url_param, pattern_arg_str, PATTERN_TYPE_STRING, PATTERN_FETCH_REQ },
 	{ "cookie", pattern_fetch_cookie, pattern_arg_str, PATTERN_TYPE_STRING, PATTERN_FETCH_REQ },
 	{ "set-cookie", pattern_fetch_set_cookie, pattern_arg_str, PATTERN_TYPE_STRING, PATTERN_FETCH_RTR },

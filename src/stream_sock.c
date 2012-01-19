@@ -73,6 +73,7 @@
  */
 static int stream_sock_splice_in(struct buffer *b, struct stream_interface *si)
 {
+	static int splice_detects_close;
 	int fd = si->fd;
 	int ret;
 	unsigned long max;
@@ -128,8 +129,10 @@ static int stream_sock_splice_in(struct buffer *b, struct stream_interface *si)
 		if (ret <= 0) {
 			if (ret == 0) {
 				/* connection closed. This is only detected by
-				 * recent kernels (>= 2.6.27.13).
+				 * recent kernels (>= 2.6.27.13). If we notice
+				 * it works, we store the info for later use.
 				 */
+				splice_detects_close = 1;
 				b->flags |= BF_READ_NULL;
 				retval = 1; /* no need for further polling */
 				break;
@@ -151,13 +154,18 @@ static int stream_sock_splice_in(struct buffer *b, struct stream_interface *si)
 					break;
 				}
 
-				/* We don't know if the connection was closed.
+				/* We don't know if the connection was closed,
+				 * but if we know splice detects close, then we
+				 * know it for sure.
 				 * But if we're called upon POLLIN with an empty
-				 * pipe and get EAGAIN, it is suspect enought to
+				 * pipe and get EAGAIN, it is suspect enough to
 				 * try to fall back to the normal recv scheme
 				 * which will be able to deal with the situation.
 				 */
-				retval = -1;
+				if (splice_detects_close)
+					retval = 0; /* we know for sure that it's EAGAIN */
+				else
+					retval = -1;
 				break;
 			}
 
@@ -437,8 +445,8 @@ int stream_sock_read(int fd) {
 	 * immediately afterwards once the following data is parsed (eg:
 	 * HTTP chunking).
 	 */
-	if ((b->pipe || b->send_max == b->l)
-	    && (b->cons->flags & SI_FL_WAIT_DATA)) {
+	if (b->pipe || /* always try to send spliced data */
+	    (b->send_max == b->l && (b->cons->flags & SI_FL_WAIT_DATA))) {
 		int last_len = b->pipe ? b->pipe->data : 0;
 
 		b->cons->chk_snd(b->cons);
@@ -569,6 +577,11 @@ static int stream_sock_write_loop(struct stream_interface *si, struct buffer *b)
 
 		if (--write_poll <= 0)
 			return retval;
+
+		/* The only reason we did not empty the pipe is that the output
+		 * buffer is full.
+		 */
+		return 0;
 	}
 
 	/* At this point, the pipe is empty, but we may still have data pending
@@ -1053,9 +1066,12 @@ void stream_sock_chk_snd(struct stream_interface *si)
 	if (unlikely(si->state != SI_ST_EST || (ob->flags & BF_SHUTW)))
 		return;
 
-	if (!(si->flags & SI_FL_WAIT_DATA) ||        /* not waiting for data */
-	    (fdtab[si->fd].ev & FD_POLL_OUT) ||      /* we'll be called anyway */
-	    ((ob->flags & BF_OUT_EMPTY) && !(si->send_proxy_ofs)))  /* called with nothing to send ! */
+	if (unlikely((ob->flags & BF_OUT_EMPTY) && !(si->send_proxy_ofs)))  /* called with nothing to send ! */
+		return;
+
+	if (!ob->pipe &&                          /* spliced data wants to be forwarded ASAP */
+	    (!(si->flags & SI_FL_WAIT_DATA) ||    /* not waiting for data */
+	     (fdtab[si->fd].ev & FD_POLL_OUT)))   /* we'll be called anyway */
 		return;
 
 	retval = stream_sock_write_loop(si, ob);
