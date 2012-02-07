@@ -20,11 +20,11 @@
 #include <syslog.h>
 #include <time.h>
 
-#include <netinet/tcp.h>
-
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+
+#include <netinet/tcp.h>
 
 #include <common/appsession.h>
 #include <common/base64.h>
@@ -1454,7 +1454,7 @@ const char *http_parse_reqline(struct http_msg *msg, const char *msg_buf,
 
 	case HTTP_MSG_RQURI:
 	http_msg_rquri:
-		if (likely(!HTTP_IS_LWS(*ptr)))
+		if (likely((unsigned char)(*ptr - 33) <= 93)) /* 33 to 126 included */
 			EAT_AND_JUMP_OR_RETURN(http_msg_rquri, HTTP_MSG_RQURI);
 
 		if (likely(HTTP_IS_SPHT(*ptr))) {
@@ -1462,8 +1462,28 @@ const char *http_parse_reqline(struct http_msg *msg, const char *msg_buf,
 			EAT_AND_JUMP_OR_RETURN(http_msg_rquri_sp, HTTP_MSG_RQURI_SP);
 		}
 
-		/* so it's a CR/LF, meaning an HTTP 0.9 request */
-		goto http_msg_req09_uri_e;
+		if (likely((unsigned char)*ptr >= 128)) {
+			/* non-ASCII chars are forbidden unless option
+			 * accept-invalid-http-request is enabled in the frontend.
+			 * In any case, we capture the faulty char.
+			 */
+			if (msg->err_pos < -1)
+				goto invalid_char;
+			if (msg->err_pos == -1)
+				msg->err_pos = ptr - msg_buf;
+			EAT_AND_JUMP_OR_RETURN(http_msg_rquri, HTTP_MSG_RQURI);
+		}
+
+		if (likely(HTTP_IS_CRLF(*ptr))) {
+			/* so it's a CR/LF, meaning an HTTP 0.9 request */
+			goto http_msg_req09_uri_e;
+		}
+
+		/* OK forbidden chars, 0..31 or 127 */
+	invalid_char:
+		msg->err_pos = ptr - msg_buf;
+		state = HTTP_MSG_ERROR;
+		break;
 
 	case HTTP_MSG_RQURI_SP:
 	http_msg_rquri_sp:
@@ -3941,12 +3961,12 @@ int http_send_name_header(struct http_txn *txn, struct http_msg *msg, struct buf
 
 	struct hdr_ctx ctx;
 
-	ctx.idx = 0;
-
 	char *hdr_name = be->server_id_hdr_name;
 	int hdr_name_len = be->server_id_hdr_len;
 
 	char *hdr_val;
+
+	ctx.idx = 0;
 
 	while (http_find_header2(hdr_name, hdr_name_len, msg->sol, &txn->hdr_idx, &ctx)) {
 		/* remove any existing values from the header */
