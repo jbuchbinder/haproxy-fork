@@ -34,6 +34,33 @@
 
 extern struct pool_head *pool2_requri;
 
+extern char *log_format;
+extern char default_http_log_format[];
+extern char clf_http_log_format[];
+
+/*
+ * Parse args in a logformat_var
+ */
+int parse_logformat_var_args(char *args, struct logformat_node *node);
+
+/*
+ * Parse a variable '%varname' or '%{args}varname' in logformat
+ *
+ */
+int parse_logformat_var(char *str, size_t len, struct proxy *curproxy);
+
+/*
+ * add to the logformat linked list
+ */
+void add_to_logformat_list(char *start, char *end, int type, struct proxy *curproxy);
+
+/*
+ * Parse the log_format string and fill a linked list.
+ * Variable name are preceded by % and composed by characters [a-zA-Z0-9]* : %varname
+ * You can set arguments using { } : %{many arguments}varname
+ */
+void parse_logformat_string(char *str, struct proxy *curproxy);
+
 /*
  * Displays the message on stderr with the date and pid. Overrides the quiet
  * mode during startup.
@@ -53,15 +80,24 @@ void Warning(const char *fmt, ...)
 void qfprintf(FILE *out, const char *fmt, ...)
 	__attribute__ ((format(printf, 2, 3)));
 
+/* generate the syslog header one time per second */
+char *hdr_log(char *dst);
+
+/*
+ * This function adds a header to the message and sends the syslog message
+ * using a printf format string
+ */
+void send_log(struct proxy *p, int level, const char *format, ...)
+	__attribute__ ((format(printf, 3, 4)));
+
 /*
  * This function sends a syslog message to both log servers of a proxy,
  * or to global log servers if the proxy is NULL.
  * It also tries not to waste too much time computing the message header.
  * It doesn't care about errors nor does it report them.
  */
-void send_log(struct proxy *p, int level, const char *message, ...)
-	__attribute__ ((format(printf, 3, 4)));
 
+void __send_log(struct proxy *p, int level, char *message, size_t size);
 /*
  * send a log for the session when we have enough info about it
  */
@@ -76,6 +112,14 @@ int get_log_level(const char *lev);
  * returns log facility for <fac> or -1 if not found.
  */
 int get_log_facility(const char *fac);
+
+/*
+ * Write a string in the log string
+ * Take cares of mandatory and quote options
+ *
+ * Return the adress of the \0 character, or NULL on error
+ */
+char *logformat_write_string(char *dst, char *src, size_t size, struct logformat_node *node);
 
 #endif /* _PROTO_LOG_H */
 

@@ -31,6 +31,16 @@
 #include <eb32tree.h>
 #include <proto/fd.h>
 
+#ifndef LLONG_MAX
+# define LLONG_MAX 9223372036854775807LL
+# define LLONG_MIN (-LLONG_MAX - 1LL)
+#endif
+
+#ifndef ULLONG_MAX
+# define ULLONG_MAX	(LLONG_MAX * 2ULL + 1)
+#endif
+
+
 /****** string-specific macros and functions ******/
 /* if a > max, then bound <a> to <max>. The macro returns the new <a> */
 #define UBOUND(a, max)	({ typeof(a) b = (max); if ((a) > b) (a) = b; (a); })
@@ -71,6 +81,46 @@ static inline const char *ultoa(unsigned long n)
 {
 	return ultoa_r(n, itoa_str[0], sizeof(itoa_str[0]));
 }
+
+/*
+ * unsigned long long ASCII representation
+ *
+ * return the last char '\0' or NULL if no enough
+ * space in dst
+ */
+char *ulltoa(unsigned long long n, char *dst, size_t size);
+
+
+/*
+ * unsigned long ASCII representation
+ *
+ * return the last char '\0' or NULL if no enough
+ * space in dst
+ */
+char *ultoa_o(unsigned long n, char *dst, size_t size);
+
+/*
+ * signed long ASCII representation
+ *
+ * return the last char '\0' or NULL if no enough
+ * space in dst
+ */
+char *ltoa_o(long int n, char *dst, size_t size);
+
+/*
+ * signed long long ASCII representation
+ *
+ * return the last char '\0' or NULL if no enough
+ * space in dst
+ */
+char *lltoa(long long n, char *dst, size_t size);
+
+/*
+ * write a ascii representation of a unsigned into dst,
+ * return a pointer to the last character
+ * Pad the ascii representation with '0', using size.
+ */
+char *utoa_pad(unsigned int n, char *dst, size_t size);
 
 /* Fast macros to convert up to 10 different parameters inside a same call of
  * expression.
@@ -419,6 +469,11 @@ extern const char *parse_size_err(const char *text, unsigned *ret);
 #define TIME_UNIT_DAY  0x0005
 #define TIME_UNIT_MASK 0x0007
 
+#define SEC 1
+#define MINUTE (60 * SEC)
+#define HOUR (60 * MINUTE)
+#define DAY (24 * HOUR)
+
 /* Multiply the two 32-bit operands and shift the 64-bit result right 32 bits.
  * This is used to compute fixed ratios by setting one of the operands to
  * (2^32*ratio).
@@ -591,5 +646,26 @@ extern void v4tov6(struct in6_addr *sin6_addr, struct in_addr *sin_addr);
  * Return true if conversion is possible and false otherwise.
  */
 extern int v6tov4(struct in_addr *sin_addr, struct in6_addr *sin6_addr);
+
+char *human_time(int t, short hz_div);
+
+extern const char *monthname[];
+
+/* date2str_log: write a date in the format :
+ * 	sprintf(str, "%02d/%s/%04d:%02d:%02d:%02d.%03d",
+ *		tm.tm_mday, monthname[tm.tm_mon], tm.tm_year+1900,
+ *		tm.tm_hour, tm.tm_min, tm.tm_sec, (int)date.tv_usec/1000);
+ *
+ * without using sprintf. return a pointer to the last char written (\0) or
+ * NULL if there isn't enough space.
+ */
+char *date2str_log(char *dest, struct tm *tm, struct timeval *date, size_t size);
+
+/* gmt2str_log: write a date in the format :
+ * "%02d/%s/%04d:%02d:%02d:%02d +0000" without using snprintf
+ * return a pointer to the last char written (\0) or
+ * NULL if there isn't enough space.
+ */
+char *gmt2str_log(char *dst, struct tm *tm, size_t size);
 
 #endif /* _COMMON_STANDARD_H */

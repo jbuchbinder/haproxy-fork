@@ -28,6 +28,7 @@
 #include <common/time.h>
 
 #include <types/global.h>
+#include <types/log.h>
 
 #include <proto/log.h>
 #include <proto/stream_interface.h>
@@ -47,13 +48,301 @@ const char *log_levels[NB_LOG_LEVELS] = {
 	"warning", "notice", "info", "debug"
 };
 
-const char *monthname[12] = {
-	"Jan", "Feb", "Mar", "Apr", "May", "Jun",
-	"Jul", "Aug", "Sep", "Oct", "Nov", "Dec"
-};
-
 const char sess_term_cond[10] = "-cCsSPRIDK";	/* normal, CliTo, CliErr, SrvTo, SrvErr, PxErr, Resource, Internal, Down, Killed */
 const char sess_fin_state[8]  = "-RCHDLQT";	/* cliRequest, srvConnect, srvHeader, Data, Last, Queue, Tarpit */
+
+
+/* log_format   */
+struct logformat_type {
+	char *name;
+	int type;
+};
+
+/* log_format variable names */
+static const struct logformat_type logformat_keywords[] = {
+	{ "o", LOG_GLOBAL },  /* global option */
+	{ "Ci", LOG_CLIENTIP },  /* client ip */
+	{ "Cp", LOG_CLIENTPORT }, /* client port */
+	{ "t", LOG_DATE },      /* date */
+	{ "T", LOG_DATEGMT },   /* date GMT */
+	{ "ms", LOG_MS },       /* accept date millisecond */
+	{ "f", LOG_FRONTEND },  /* frontend */
+	{ "b", LOG_BACKEND },   /* backend */
+	{ "s", LOG_SERVER },    /* server */
+	{ "B", LOG_BYTES },     /* bytes read */
+	{ "Tq", LOG_TQ },       /* Tq */
+	{ "Tw", LOG_TW },       /* Tw */
+	{ "Tc", LOG_TC },       /* Tc */
+	{ "Tr", LOG_TR },       /* Tr */
+	{ "Tt", LOG_TT },       /* Tt */
+	{ "st", LOG_STATUS },   /* status code */
+	{ "cc", LOG_CCLIENT },  /* client cookie */
+	{ "cs", LOG_CSERVER },  /* server cookie */
+	{ "ts", LOG_TERMSTATE },/* terminaison state */
+	{ "ac", LOG_ACTCONN },  /* actconn */
+	{ "fc", LOG_FECONN },   /* feconn */
+	{ "bc", LOG_BECONN },   /* beconn */
+	{ "sc", LOG_SRVCONN },  /* srv_conn */
+	{ "rc", LOG_RETRIES },  /* retries */
+	{ "sq", LOG_SRVQUEUE }, /* srv_queue */
+	{ "bq", LOG_BCKQUEUE }, /* backend_queue */
+	{ "hr", LOG_HDRREQUEST }, /* header request */
+	{ "hs", LOG_HDRRESPONS },  /* header response */
+	{ "hrl", LOG_HDRREQUESTLIST }, /* header request list */
+	{ "hsl", LOG_HDRRESPONSLIST },  /* header response list */
+	{ "r", LOG_REQ },  /* request */
+	{ 0, 0 }
+};
+
+char default_http_log_format[] = "%Ci:%Cp [%t] %f %b/%s %Tq/%Tw/%Tc/%Tr/%Tt %st %B %cc %cs %ts %ac/%fc/%bc/%sc/%rc %sq/%bq %hr %hs %{+Q}r"; // default format
+char clf_http_log_format[] = "%{+Q}o %{-Q}Ci - - [%T] %r %st %B \"\" \"\" %Cp %ms %f %b %s %Tq %Tw %Tc %Tr %Tt %ts %ac %fc %bc %sc %rc %sq %bq %cc %cs %hrl %hsl";
+char *log_format = NULL;
+
+struct logformat_var_args {
+	char *name;
+	int mask;
+};
+
+struct logformat_var_args var_args_list[] = {
+// global
+	{ "M", LOG_OPT_MANDATORY },
+	{ "Q", LOG_OPT_QUOTE },
+	{  0,  0 }
+};
+
+/*
+ * Parse args in a logformat_var
+ */
+int parse_logformat_var_args(char *args, struct logformat_node *node)
+{
+	int i = 0;
+	int end = 0;
+	int flags = 0;  // 1 = +  2 = -
+	char *sp = NULL; // start pointer
+
+	if (args == NULL)
+		return 1;
+
+	while (1) {
+		if (*args == '\0')
+			end = 1;
+
+		if (*args == '+') {
+			// add flag
+			sp = args + 1;
+			flags = 1;
+		}
+		if (*args == '-') {
+			// delete flag
+			sp = args + 1;
+			flags = 2;
+		}
+
+		if (*args == '\0' || *args == ',') {
+			*args = '\0';
+			for (i = 0; var_args_list[i].name; i++) {
+				if (strcmp(sp, var_args_list[i].name) == 0) {
+					if (flags == 1) {
+						node->options |= var_args_list[i].mask;
+						break;
+					} else if (flags == 2) {
+						node->options &= ~var_args_list[i].mask;
+						break;
+					}
+				}
+			}
+			sp = NULL;
+			if (end)
+				break;
+		}
+	args++;
+	}
+	return 0;
+}
+
+/*
+ * Parse a variable '%varname' or '%{args}varname' in logformat
+ *
+ */
+int parse_logformat_var(char *str, size_t len, struct proxy *curproxy)
+{
+	int i, j;
+	char *arg = NULL; // arguments
+	int fparam = 0;
+	char *name = NULL;
+	struct logformat_node *node = NULL;
+	char varname[255] = { 0 }; // variable name
+	int logformat_options = 0x00000000;
+
+
+	for (i = 1; i < len; i++) { // escape first char %
+		if (!arg && str[i] == '{') {
+			arg = str + i;
+			fparam = 1;
+		} else if (arg && str[i] == '}') {
+			char *tmp = arg;
+			arg = calloc(str + i - tmp, 1); // without {}
+			strncpy(arg, tmp + 1, str + i - tmp - 1); // copy without { and }
+			arg[str + i - tmp - 1] = '\0';
+			fparam = 0;
+		} else if (!name && !fparam) {
+			strncpy(varname, str + i, len - i + 1);
+			varname[len - i] = '\0';
+			for (j = 0; logformat_keywords[j].name; j++) { // search a log type
+				if (strcmp(varname, logformat_keywords[j].name) == 0) {
+					node = calloc(1, sizeof(struct logformat_node));
+					node->type = logformat_keywords[j].type;
+					node->options = logformat_options;
+					node->arg = arg;
+					parse_logformat_var_args(node->arg, node);
+					if (node->type == LOG_GLOBAL) {
+						logformat_options = node->options;
+						free(node);
+					} else {
+						LIST_ADDQ(&curproxy->logformat, &node->list);
+					}
+					return 0;
+				}
+			}
+			Warning("Warning: No such variable name '%s' in logformat\n", varname);
+			if (arg)
+				free(arg);
+			return -1;
+		}
+	}
+	return -1;
+}
+
+/*
+ *  push to the logformat linked list
+ *
+ *  start: start pointer
+ *  end: end text pointer
+ *  type: string type
+ *
+ *  LOG_TEXT: copy chars from start to end excluding end.
+ *
+*/
+void add_to_logformat_list(char *start, char *end, int type, struct proxy *curproxy)
+{
+	char *str;
+
+	if (type == LOG_TEXT) { /* type text */
+		struct logformat_node *node = calloc(1, sizeof(struct logformat_node));
+
+		str = calloc(end - start + 1, 1);
+		strncpy(str, start, end - start);
+
+		str[end - start] = '\0';
+		node->arg = str;
+		node->type = LOG_TEXT; // type string
+		LIST_ADDQ(&curproxy->logformat, &node->list);
+	} else if (type == LOG_VARIABLE) { /* type variable */
+		parse_logformat_var(start, end - start, curproxy);
+	} else if (type == LOG_SEPARATOR) {
+		struct logformat_node *node = calloc(1, sizeof(struct logformat_node));
+		node->type = LOG_SEPARATOR;
+		LIST_ADDQ(&curproxy->logformat, &node->list);
+	}
+}
+
+/*
+ * Parse the log_format string and fill a linked list.
+ * Variable name are preceded by % and composed by characters [a-zA-Z0-9]* : %varname
+ * You can set arguments using { } : %{many arguments}varname
+ */
+void parse_logformat_string(char *str, struct proxy *curproxy)
+{
+	char *sp = str; /* start pointer */
+	int cformat = -1; /* current token format : LOG_TEXT, LOG_SEPARATOR, LOG_VARIABLE */
+	int pformat = -1; /* previous token format */
+	struct logformat_node *tmplf, *back;
+
+	/* flush the list first. */
+	list_for_each_entry_safe(tmplf, back, &curproxy->logformat, list) {
+		LIST_DEL(&tmplf->list);
+		free(tmplf);
+	}
+
+	while (1) {
+
+		// push the variable only if formats are different, not
+		// within a variable, and not the first iteration
+		if ((cformat != pformat && cformat != -1 && pformat != -1) || *str == '\0') {
+			if (((pformat != LF_STARTVAR && cformat != LF_VAR) &&
+			    (pformat != LF_STARTVAR && cformat != LF_STARG) &&
+			    (pformat != LF_STARG && cformat !=  LF_VAR)) || *str == '\0') {
+				if (pformat > LF_VAR) // unfinished string
+					pformat = LF_TEXT;
+				add_to_logformat_list(sp, str, pformat, curproxy);
+				sp = str;
+				if (*str == '\0')
+					break;
+			    }
+		}
+
+		if (cformat != -1)
+			str++; // consume the string, except on the first tour
+
+		pformat = cformat;
+
+		if (*str == '\0') {
+			cformat = LF_STARTVAR; // for breaking in all cases
+			continue;
+		}
+
+		if (pformat == LF_STARTVAR) { // after a %
+			if ( (*str >= 'a' && *str <= 'z') || // parse varname
+			     (*str >= 'A' && *str <= 'Z') ||
+			     (*str >= '0' && *str <= '9')) {
+				cformat = LF_VAR; // varname
+				continue;
+			} else if (*str == '{') {
+				cformat = LF_STARG; // variable arguments
+				continue;
+			} else { // another unexpected token
+				pformat = LF_TEXT; // redefine the format of the previous token to TEXT
+				cformat = LF_TEXT;
+				continue;
+			}
+
+		} else if (pformat == LF_VAR) { // after a varname
+			if ( (*str >= 'a' && *str <= 'z') || // parse varname
+			     (*str >= 'A' && *str <= 'Z') ||
+			     (*str >= '0' && *str <= '9')) {
+				cformat = LF_VAR;
+				continue;
+			}
+		} else if (pformat  == LF_STARG) { // inside variable arguments
+			if (*str == '}') { // end of varname
+				cformat = LF_EDARG;
+				continue;
+			} else { // all tokens are acceptable within { }
+				cformat = LF_STARG;
+				continue;
+			}
+		} else if (pformat == LF_EDARG) { //  after arguments
+			if ( (*str >= 'a' && *str <= 'z') || // parse a varname
+			     (*str >= 'A' && *str <= 'Z') ||
+			     (*str >= '0' && *str <= '9')) {
+				cformat = LF_VAR;
+				continue;
+			} else { // if no varname after arguments, transform in TEXT
+				pformat = LF_TEXT;
+				cformat = LF_TEXT;
+			}
+		}
+
+		// others tokens that don't match previous conditions
+		if (*str == '%') {
+			cformat = LF_STARTVAR;
+		} else if (*str == ' ') {
+			cformat = LF_SEPARATOR;
+		} else {
+			cformat = LF_TEXT;
+		}
+	}
+}
 
 /*
  * Displays the message on stderr with the date and pid. Overrides the quiet
@@ -137,33 +426,70 @@ int get_log_facility(const char *fac)
 	facility = NB_LOG_FACILITIES - 1;
 	while (facility >= 0 && strcmp(log_facilities[facility], fac))
 		facility--;
-	
+
 	return facility;
 }
 
 /*
- * This function sends a syslog message to both log servers of a proxy,
- * or to global log servers if the proxy is NULL.
- * It also tries not to waste too much time computing the message header.
- * It doesn't care about errors nor does it report them.
+ * Write a string in the log string
+ * Take cares of mandatory and quote options
+ *
+ * Return the adress of the \0 character, or NULL on error
  */
-void send_log(struct proxy *p, int level, const char *message, ...)
+char *logformat_write_string(char *dst, char *src, size_t size, struct logformat_node *node)
 {
-	static int logfdunix = -1;	/* syslog to AF_UNIX socket */
-	static int logfdinet = -1;	/* syslog to AF_INET socket */
-	static long tvsec = -1;	/* to force the string to be initialized */
-	va_list argp;
-	static char logmsg[MAX_SYSLOG_LEN];
-	static char *dataptr = NULL;
-	int fac_level;
-	int hdr_len, data_len;
-	struct list *logsrvs = NULL;
-	struct logsrv *tmp = NULL;
-	int nblogger;
-	char *log_ptr;
+        char *orig = dst;
 
-	if (level < 0 || message == NULL)
-		return;
+        if (src == NULL || *src == '\0') {
+                        if (node->options & LOG_OPT_QUOTE) {
+                                if (size > 2) {
+                                        *(dst++) = '"';
+                                        *(dst++) = '"';
+                                        *dst = '\0';
+                                        node->options |= LOG_OPT_WRITTEN;
+                                } else {
+                                        dst = NULL;
+                                        return dst;
+                                }
+                        } else {
+                                if (size > 1) {
+                                        *(dst++) = '-';
+                                        *dst = '\0';
+                                        node->options |= LOG_OPT_WRITTEN;
+                                } else { // error no space available
+                                        dst = NULL;
+                                        return dst;
+                                }
+                        }
+        } else {
+                if (node->options & LOG_OPT_QUOTE) {
+                        if (size-- > 1 ) {
+                                *(dst++) = '"';
+                        } else {
+                                dst = NULL;
+                                return NULL;
+                        }
+                        dst += strlcpy2(dst, src, size);
+                        size -= orig - dst + 1;
+                        if (size > 1) {
+                                *(dst++) = '"';
+                                *dst = '\0';
+                        } else {
+                                dst = NULL;
+                        }
+                } else {
+                        dst += strlcpy2(dst, src, size);
+                }
+        }
+        return dst;
+}
+
+/* generate the syslog header once a second */
+char *hdr_log(char *dst)
+{
+	int hdr_len = 0;
+	static long tvsec = -1;	/* to force the string to be initialized */
+	static char *dataptr = NULL;
 
 	if (unlikely(date.tv_sec != tvsec || dataptr == NULL)) {
 		/* this string is rebuild only once a second */
@@ -172,7 +498,7 @@ void send_log(struct proxy *p, int level, const char *message, ...)
 		tvsec = date.tv_sec;
 		get_localtime(tvsec, &tm);
 
-		hdr_len = snprintf(logmsg, sizeof(logmsg),
+		hdr_len = snprintf(dst, MAX_SYSLOG_LEN,
 				   "<<<<>%s %2d %02d:%02d:%02d %s%s[%d]: ",
 				   monthname[tm.tm_mon],
 				   tm.tm_mday, tm.tm_hour, tm.tm_min, tm.tm_sec,
@@ -182,22 +508,57 @@ void send_log(struct proxy *p, int level, const char *message, ...)
 		 * either -1 or the number of bytes that would be needed to store
 		 * the total message. In both cases, we must adjust it.
 		 */
-		if (hdr_len < 0 || hdr_len > sizeof(logmsg))
-			hdr_len = sizeof(logmsg);
+		if (hdr_len < 0 || hdr_len > MAX_SYSLOG_LEN)
+			hdr_len = MAX_SYSLOG_LEN;
 
-		dataptr = logmsg + hdr_len;
+		dataptr = dst + hdr_len;
 	}
 
-	va_start(argp, message);
-	/*
-	 * FIXME: we take a huge performance hit here. We might have to replace
-	 * vsnprintf() for a hard-coded log writer.
-	 */
-	data_len = vsnprintf(dataptr, logmsg + sizeof(logmsg) - dataptr, message, argp);
-	if (data_len < 0 || data_len > (logmsg + sizeof(logmsg) - dataptr))
-		data_len = logmsg + sizeof(logmsg) - dataptr;
+	return dataptr;
+}
+
+/*
+ * This function adds a header to the message and sends the syslog message
+ * using a printf format string
+ */
+void send_log(struct proxy *p, int level, const char *format, ...)
+{
+	va_list argp;
+	static char logmsg[MAX_SYSLOG_LEN];
+	static char *dataptr = NULL;
+	int  data_len = 0;
+
+	if (level < 0 || format == NULL)
+		return;
+
+	dataptr = hdr_log(logmsg); /* create header */
+	data_len = dataptr - logmsg;
+
+	va_start(argp, format);
+	data_len += vsnprintf(dataptr, MAX_SYSLOG_LEN, format, argp);
+	if (data_len < 0 || data_len > MAX_SYSLOG_LEN)
+		data_len =  MAX_SYSLOG_LEN;
 	va_end(argp);
-	dataptr[data_len - 1] = '\n'; /* force a break on ultra-long lines */
+
+	__send_log(p, level, logmsg, data_len);
+}
+
+/*
+ * This function sends a syslog message.
+ * It doesn't care about errors nor does it report them.
+ */
+void __send_log(struct proxy *p, int level, char *message, size_t size)
+{
+	static int logfdunix = -1;	/* syslog to AF_UNIX socket */
+	static int logfdinet = -1;	/* syslog to AF_INET socket */
+	static char *dataptr = NULL;
+	int fac_level;
+	struct list *logsrvs = NULL;
+	struct logsrv *tmp = NULL;
+	int nblogger;
+	char *log_ptr;
+
+	dataptr = message;
 
 	if (p == NULL) {
 		if (!LIST_ISEMPTY(&global.logsrvs)) {
@@ -211,6 +572,8 @@ void send_log(struct proxy *p, int level, const char *message, ...)
 
 	if (!logsrvs)
 		return;
+
+	message[size - 1] = '\n';
 
 	/* Lazily set up syslog sockets for protocol families of configured
 	 * syslog servers. */
@@ -263,16 +626,15 @@ void send_log(struct proxy *p, int level, const char *message, ...)
 		 * and we change the pointer to the header accordingly.
 		 */
 		fac_level = (logsrv->facility << 3) + MAX(level, logsrv->minlvl);
-		log_ptr = logmsg + 3; /* last digit of the log level */
+		log_ptr = dataptr + 3; /* last digit of the log level */
 		do {
 			*log_ptr = '0' + fac_level % 10;
 			fac_level /= 10;
 			log_ptr--;
-		} while (fac_level && log_ptr > logmsg);
+		} while (fac_level && log_ptr > dataptr);
 		*log_ptr = '<';
-	
-		/* the total syslog message now starts at logptr, for dataptr+data_len-logptr */
-		sent = sendto(*plogfd, log_ptr, dataptr + data_len - log_ptr,
+
+		sent = sendto(*plogfd, log_ptr, size,
 			      MSG_DONTWAIT | MSG_NOSIGNAL,
 			      (struct sockaddr *)&logsrv->addr, get_addr_len(&logsrv->addr));
 		if (sent < 0) {
