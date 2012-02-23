@@ -443,13 +443,14 @@ endif
 
 ifneq ($(USE_PCRE),)
 # PCREDIR is the directory hosting include/pcre.h and lib/libpcre.*. It is
-# automatically detected but can be forced if required.
+# automatically detected but can be forced if required. Forcing it to an empty
+# string will result in search only in the default paths.
 ifeq ($(PCREDIR),)
 PCREDIR	        := $(shell pcre-config --prefix 2>/dev/null || echo /usr/local)
 endif
 ifeq ($(USE_STATIC_PCRE),)
-OPTIONS_CFLAGS  += -DUSE_PCRE -I$(PCREDIR)/include
-OPTIONS_LDFLAGS += -L$(PCREDIR)/lib -lpcreposix -lpcre
+OPTIONS_CFLAGS  += -DUSE_PCRE $(if $(PCREDIR),-I$(PCREDIR)/include)
+OPTIONS_LDFLAGS += $(if $(PCREDIR),-L$(PCREDIR)/lib) -lpcreposix -lpcre
 endif
 BUILD_OPTIONS   += $(call ignore_implicit,USE_PCRE)
 endif
@@ -460,8 +461,8 @@ ifneq ($(USE_STATIC_PCRE),)
 ifeq ($(PCREDIR),)
 PCREDIR         := $(shell pcre-config --prefix 2>/dev/null || echo /usr/local)
 endif
-OPTIONS_CFLAGS  += -DUSE_PCRE -I$(PCREDIR)/include
-OPTIONS_LDFLAGS += -L$(PCREDIR)/lib -Wl,-Bstatic -lpcreposix -lpcre -Wl,-Bdynamic
+OPTIONS_CFLAGS  += -DUSE_PCRE $(if $(PCREDIR),-I$(PCREDIR)/include)
+OPTIONS_LDFLAGS += $(if $(PCREDIR),-L$(PCREDIR)/lib) -Wl,-Bstatic -lpcreposix -lpcre -Wl,-Bdynamic
 BUILD_OPTIONS   += $(call ignore_implicit,USE_STATIC_PCRE)
 endif
 
@@ -520,7 +521,7 @@ OBJS = src/haproxy.o src/sessionhash.o src/base64.o src/protocols.o \
        src/checks.o src/queue.o src/frontend.o src/proxy.o src/peers.o \
        src/stick_table.o src/proto_uxst.o \
        src/proto_http.o src/stream_sock.o src/appsession.o src/backend.o \
-       src/lb_chash.o src/lb_fwlc.o src/lb_fwrr.o src/lb_map.o \
+       src/lb_chash.o src/lb_fwlc.o src/lb_fwrr.o src/lb_map.o src/lb_fas.o \
        src/stream_interface.o src/dumpstats.o src/proto_tcp.o \
        src/session.o src/hdr_idx.o src/ev_select.o src/signal.o \
        src/acl.o src/pattern.o src/memory.o src/freq_ctr.o src/auth.o

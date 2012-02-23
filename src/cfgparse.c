@@ -46,6 +46,7 @@
 #include <proto/frontend.h>
 #include <proto/hdr_idx.h>
 #include <proto/lb_chash.h>
+#include <proto/lb_fas.h>
 #include <proto/lb_fwlc.h>
 #include <proto/lb_fwrr.h>
 #include <proto/lb_map.h>
@@ -5735,6 +5736,13 @@ int check_config_validity()
 				 */
 				target->bind_proc = curproxy->bind_proc ?
 					(target->bind_proc | curproxy->bind_proc) : 0;
+
+				/* Emit a warning if this proxy also has some servers */
+				if (curproxy->srv) {
+					Warning("In proxy '%s', the 'default_backend' rule always has precedence over the servers, which will never be used.\n",
+						curproxy->id);
+					err_code |= ERR_WARN;
+				}
 			}
 		}
 
@@ -6210,9 +6218,14 @@ out_uri_auth_compat:
 			}
 			break;
 
-		case BE_LB_KIND_LC:
-			curproxy->lbprm.algo |= BE_LB_LKUP_LCTREE | BE_LB_PROP_DYN;
-			fwlc_init_server_tree(curproxy);
+		case BE_LB_KIND_CB:
+			if ((curproxy->lbprm.algo & BE_LB_PARM) == BE_LB_CB_LC) {
+				curproxy->lbprm.algo |= BE_LB_LKUP_LCTREE | BE_LB_PROP_DYN;
+				fwlc_init_server_tree(curproxy);
+			} else {
+				curproxy->lbprm.algo |= BE_LB_LKUP_FSTREE | BE_LB_PROP_DYN;
+				fas_init_server_tree(curproxy);
+			}
 			break;
 
 		case BE_LB_KIND_HI:
