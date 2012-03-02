@@ -1246,7 +1246,7 @@ out:
 	if (tmplog == NULL) // if previous error
 		tmplog = logline + MAX_SYSLOG_LEN - 1;
 
-	__send_log(prx_log, level, logline, tmplog - logline + 2);
+	__send_log(prx_log, level, logline, tmplog - logline + 1);
 	s->logs.logwait = 0;
 
 }
@@ -2155,7 +2155,7 @@ int http_parse_chunk_size(struct buffer *buf, struct http_msg *msg)
 			break;
 		if (++ptr >= end)
 			ptr = buf->data;
-		if (chunk & 0xF000000) /* overflow will occur */
+		if (chunk & 0xF8000000) /* integer overflow will occur if result >= 2GB */
 			goto error;
 		chunk = (chunk << 4) + c;
 	}
@@ -4040,8 +4040,11 @@ void http_end_txn_clean_session(struct session *s)
 
 	http_silent_debug(__LINE__, s);
 
-	if (s->flags & SN_BE_ASSIGNED)
+	if (s->flags & SN_BE_ASSIGNED) {
 		s->be->beconn--;
+		if (unlikely(s->srv_conn))
+			sess_change_server(s, NULL);
+	}
 
 	s->logs.t_close = tv_ms_elapsed(&s->logs.tv_accept, &now);
 	session_process_counters(s);
@@ -4098,8 +4101,6 @@ void http_end_txn_clean_session(struct session *s)
 			process_srv_queue(target_srv(&s->target));
 	}
 
-	if (unlikely(s->srv_conn))
-		sess_change_server(s, NULL);
 	clear_target(&s->target);
 
 	s->req->cons->state     = s->req->cons->prev_state = SI_ST_INI;
