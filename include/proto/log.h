@@ -35,8 +35,16 @@
 extern struct pool_head *pool2_requri;
 
 extern char *log_format;
+extern char default_tcp_log_format[];
 extern char default_http_log_format[];
 extern char clf_http_log_format[];
+
+
+/*
+ * send a log for the session when we have enough info about it.
+ * Will not log if the frontend has no log defined.
+ */
+void sess_log(struct session *s);
 
 /*
  * Parse args in a logformat_var
@@ -47,7 +55,7 @@ int parse_logformat_var_args(char *args, struct logformat_node *node);
  * Parse a variable '%varname' or '%{args}varname' in logformat
  *
  */
-int parse_logformat_var(char *str, size_t len, struct proxy *curproxy);
+int parse_logformat_var(char *str, size_t len, struct proxy *curproxy, int *options);
 
 /*
  * add to the logformat linked list
@@ -80,9 +88,6 @@ void Warning(const char *fmt, ...)
 void qfprintf(FILE *out, const char *fmt, ...)
 	__attribute__ ((format(printf, 2, 3)));
 
-/* generate the syslog header one time per second */
-char *hdr_log(char *dst);
-
 /*
  * This function adds a header to the message and sends the syslog message
  * using a printf format string
@@ -98,10 +103,6 @@ void send_log(struct proxy *p, int level, const char *format, ...)
  */
 
 void __send_log(struct proxy *p, int level, char *message, size_t size);
-/*
- * send a log for the session when we have enough info about it
- */
-void tcp_sess_log(struct session *s);
 
 /*
  * returns log level for <lev> or -1 if not found.

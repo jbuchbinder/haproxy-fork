@@ -56,47 +56,60 @@ const char sess_fin_state[8]  = "-RCHDLQT";	/* cliRequest, srvConnect, srvHeader
 struct logformat_type {
 	char *name;
 	int type;
+	int mode;
+	int (*config_callback)(struct logformat_node *node, struct proxy *curproxy);
 };
+
+int prepare_addrsource(struct logformat_node *node, struct proxy *curproxy);
 
 /* log_format variable names */
 static const struct logformat_type logformat_keywords[] = {
-	{ "o", LOG_GLOBAL },  /* global option */
-	{ "Ci", LOG_CLIENTIP },  /* client ip */
-	{ "Cp", LOG_CLIENTPORT }, /* client port */
-	{ "t", LOG_DATE },      /* date */
-	{ "T", LOG_DATEGMT },   /* date GMT */
-	{ "ms", LOG_MS },       /* accept date millisecond */
-	{ "f", LOG_FRONTEND },  /* frontend */
-	{ "b", LOG_BACKEND },   /* backend */
-	{ "s", LOG_SERVER },    /* server */
-	{ "B", LOG_BYTES },     /* bytes read */
-	{ "Tq", LOG_TQ },       /* Tq */
-	{ "Tw", LOG_TW },       /* Tw */
-	{ "Tc", LOG_TC },       /* Tc */
-	{ "Tr", LOG_TR },       /* Tr */
-	{ "Tt", LOG_TT },       /* Tt */
-	{ "st", LOG_STATUS },   /* status code */
-	{ "cc", LOG_CCLIENT },  /* client cookie */
-	{ "cs", LOG_CSERVER },  /* server cookie */
-	{ "ts", LOG_TERMSTATE },/* terminaison state */
-	{ "ac", LOG_ACTCONN },  /* actconn */
-	{ "fc", LOG_FECONN },   /* feconn */
-	{ "bc", LOG_BECONN },   /* beconn */
-	{ "sc", LOG_SRVCONN },  /* srv_conn */
-	{ "rc", LOG_RETRIES },  /* retries */
-	{ "sq", LOG_SRVQUEUE }, /* srv_queue */
-	{ "bq", LOG_BCKQUEUE }, /* backend_queue */
-	{ "hr", LOG_HDRREQUEST }, /* header request */
-	{ "hs", LOG_HDRRESPONS },  /* header response */
-	{ "hrl", LOG_HDRREQUESTLIST }, /* header request list */
-	{ "hsl", LOG_HDRRESPONSLIST },  /* header response list */
-	{ "r", LOG_REQ },  /* request */
-	{ 0, 0 }
+	{ "o", LOG_GLOBAL, PR_MODE_TCP, NULL },  /* global option */
+	{ "Ci", LOG_CLIENTIP, PR_MODE_TCP, NULL },  /* client ip */
+	{ "Cp", LOG_CLIENTPORT, PR_MODE_TCP, NULL }, /* client port */
+	{ "Bp", LOG_SOURCEPORT, PR_MODE_TCP, prepare_addrsource }, /* backend source port */
+	{ "Bi", LOG_SOURCEIP, PR_MODE_TCP, prepare_addrsource }, /* backend source ip */
+	{ "t", LOG_DATE, PR_MODE_TCP, NULL },      /* date */
+	{ "T", LOG_DATEGMT, PR_MODE_TCP, NULL },   /* date GMT */
+	{ "ms", LOG_MS, PR_MODE_TCP, NULL },       /* accept date millisecond */
+	{ "f", LOG_FRONTEND, PR_MODE_TCP, NULL },  /* frontend */
+	{ "b", LOG_BACKEND, PR_MODE_TCP, NULL },   /* backend */
+	{ "s", LOG_SERVER, PR_MODE_TCP, NULL },    /* server */
+	{ "B", LOG_BYTES, PR_MODE_TCP, NULL },     /* bytes read */
+	{ "Tq", LOG_TQ, PR_MODE_HTTP, NULL },       /* Tq */
+	{ "Tw", LOG_TW, PR_MODE_TCP, NULL },       /* Tw */
+	{ "Tc", LOG_TC, PR_MODE_TCP, NULL },       /* Tc */
+	{ "Tr", LOG_TR, PR_MODE_HTTP, NULL },       /* Tr */
+	{ "Tt", LOG_TT, PR_MODE_TCP, NULL },       /* Tt */
+	{ "st", LOG_STATUS, PR_MODE_HTTP, NULL },   /* status code */
+	{ "cc", LOG_CCLIENT, PR_MODE_HTTP, NULL },  /* client cookie */
+	{ "cs", LOG_CSERVER, PR_MODE_HTTP, NULL },  /* server cookie */
+	{ "ts", LOG_TERMSTATE, PR_MODE_TCP, NULL },/* terminaison state */
+	{ "tsc", LOG_TERMSTATE_CK, PR_MODE_HTTP, NULL },/* terminaison state with cookie status */
+	{ "ac", LOG_ACTCONN, PR_MODE_TCP, NULL },  /* actconn */
+	{ "fc", LOG_FECONN, PR_MODE_TCP, NULL },   /* feconn */
+	{ "bc", LOG_BECONN, PR_MODE_TCP, NULL },   /* beconn */
+	{ "sc", LOG_SRVCONN, PR_MODE_TCP, NULL },  /* srv_conn */
+	{ "rc", LOG_RETRIES, PR_MODE_TCP, NULL },  /* retries */
+	{ "sq", LOG_SRVQUEUE, PR_MODE_TCP, NULL  }, /* srv_queue */
+	{ "bq", LOG_BCKQUEUE, PR_MODE_TCP, NULL }, /* backend_queue */
+	{ "hr", LOG_HDRREQUEST, PR_MODE_HTTP, NULL }, /* header request */
+	{ "hs", LOG_HDRRESPONS, PR_MODE_HTTP, NULL },  /* header response */
+	{ "hrl", LOG_HDRREQUESTLIST, PR_MODE_HTTP, NULL }, /* header request list */
+	{ "hsl", LOG_HDRRESPONSLIST, PR_MODE_HTTP, NULL },  /* header response list */
+	{ "r", LOG_REQ, PR_MODE_HTTP, NULL },  /* request */
+	{ 0, 0, 0, NULL }
 };
 
-char default_http_log_format[] = "%Ci:%Cp [%t] %f %b/%s %Tq/%Tw/%Tc/%Tr/%Tt %st %B %cc %cs %ts %ac/%fc/%bc/%sc/%rc %sq/%bq %hr %hs %{+Q}r"; // default format
-char clf_http_log_format[] = "%{+Q}o %{-Q}Ci - - [%T] %r %st %B \"\" \"\" %Cp %ms %f %b %s %Tq %Tw %Tc %Tr %Tt %ts %ac %fc %bc %sc %rc %sq %bq %cc %cs %hrl %hsl";
+char default_http_log_format[] = "%Ci:%Cp [%t] %f %b/%s %Tq/%Tw/%Tc/%Tr/%Tt %st %B %cc %cs %tsc %ac/%fc/%bc/%sc/%rc %sq/%bq %hr %hs %{+Q}r"; // default format
+char clf_http_log_format[] = "%{+Q}o %{-Q}Ci - - [%T] %r %st %B \"\" \"\" %Cp %ms %f %b %s %Tq %Tw %Tc %Tr %Tt %tsc %ac %fc %bc %sc %rc %sq %bq %cc %cs %hrl %hsl";
+char default_tcp_log_format[] = "%Ci:%Cp [%t] %f %b/%s %Tw/%Tc/%Tt %B %ts %ac/%fc/%bc/%sc/%rc %sq/%bq";
 char *log_format = NULL;
+
+/* This is a global syslog line, common to all outgoing messages. It begins
+ * with the syslog tag and the date that are updated by update_log_hdr().
+ */
+static char logline[MAX_SYSLOG_LEN];
 
 struct logformat_var_args {
 	char *name;
@@ -109,6 +122,17 @@ struct logformat_var_args var_args_list[] = {
 	{ "Q", LOG_OPT_QUOTE },
 	{  0,  0 }
 };
+
+/*
+ * callback used to configure addr source retrieval
+ */
+int prepare_addrsource(struct logformat_node *node, struct proxy *curproxy)
+{
+	curproxy->options2 |= PR_O2_SRC_ADDR;
+
+	return 0;
+}
+
 
 /*
  * Parse args in a logformat_var
@@ -164,7 +188,7 @@ int parse_logformat_var_args(char *args, struct logformat_node *node)
  * Parse a variable '%varname' or '%{args}varname' in logformat
  *
  */
-int parse_logformat_var(char *str, size_t len, struct proxy *curproxy)
+int parse_logformat_var(char *str, size_t len, struct proxy *curproxy, int *defoptions)
 {
 	int i, j;
 	char *arg = NULL; // arguments
@@ -172,8 +196,6 @@ int parse_logformat_var(char *str, size_t len, struct proxy *curproxy)
 	char *name = NULL;
 	struct logformat_node *node = NULL;
 	char varname[255] = { 0 }; // variable name
-	int logformat_options = 0x00000000;
-
 
 	for (i = 1; i < len; i++) { // escape first char %
 		if (!arg && str[i] == '{') {
@@ -190,18 +212,30 @@ int parse_logformat_var(char *str, size_t len, struct proxy *curproxy)
 			varname[len - i] = '\0';
 			for (j = 0; logformat_keywords[j].name; j++) { // search a log type
 				if (strcmp(varname, logformat_keywords[j].name) == 0) {
-					node = calloc(1, sizeof(struct logformat_node));
-					node->type = logformat_keywords[j].type;
-					node->options = logformat_options;
-					node->arg = arg;
-					parse_logformat_var_args(node->arg, node);
-					if (node->type == LOG_GLOBAL) {
-						logformat_options = node->options;
-						free(node);
+					if (!((logformat_keywords[j].mode == PR_MODE_HTTP) && (curproxy->mode == PR_MODE_TCP))) {
+						node = calloc(1, sizeof(struct logformat_node));
+						node->type = logformat_keywords[j].type;
+						node->options = *defoptions;
+						node->arg = arg;
+						parse_logformat_var_args(node->arg, node);
+						if (node->type == LOG_GLOBAL) {
+							*defoptions = node->options;
+							free(node);
+						} else {
+							if (logformat_keywords[j].config_callback != NULL) {
+								if (logformat_keywords[j].config_callback(node, curproxy) != 0) {
+									return -1;
+								 }
+							}
+							LIST_ADDQ(&curproxy->logformat, &node->list);
+						}
+						return 0;
 					} else {
-						LIST_ADDQ(&curproxy->logformat, &node->list);
+						Warning("Warning: No such variable name '%s' in this log mode\n", varname);
+						if (arg)
+							free(arg);
+						return -1;
 					}
-					return 0;
 				}
 			}
 			Warning("Warning: No such variable name '%s' in logformat\n", varname);
@@ -237,8 +271,6 @@ void add_to_logformat_list(char *start, char *end, int type, struct proxy *curpr
 		node->arg = str;
 		node->type = LOG_TEXT; // type string
 		LIST_ADDQ(&curproxy->logformat, &node->list);
-	} else if (type == LOG_VARIABLE) { /* type variable */
-		parse_logformat_var(start, end - start, curproxy);
 	} else if (type == LOG_SEPARATOR) {
 		struct logformat_node *node = calloc(1, sizeof(struct logformat_node));
 		node->type = LOG_SEPARATOR;
@@ -257,6 +289,7 @@ void parse_logformat_string(char *str, struct proxy *curproxy)
 	int cformat = -1; /* current token format : LOG_TEXT, LOG_SEPARATOR, LOG_VARIABLE */
 	int pformat = -1; /* previous token format */
 	struct logformat_node *tmplf, *back;
+	int options = 0;
 
 	/* flush the list first. */
 	list_for_each_entry_safe(tmplf, back, &curproxy->logformat, list) {
@@ -274,7 +307,10 @@ void parse_logformat_string(char *str, struct proxy *curproxy)
 			    (pformat != LF_STARG && cformat !=  LF_VAR)) || *str == '\0') {
 				if (pformat > LF_VAR) // unfinished string
 					pformat = LF_TEXT;
-				add_to_logformat_list(sp, str, pformat, curproxy);
+				if (pformat == LF_VAR)
+					parse_logformat_var(sp, str - sp, curproxy, &options);
+				else
+					add_to_logformat_list(sp, str, pformat, curproxy);
 				sp = str;
 				if (*str == '\0')
 					break;
@@ -438,67 +474,70 @@ int get_log_facility(const char *fac)
  */
 char *logformat_write_string(char *dst, char *src, size_t size, struct logformat_node *node)
 {
-        char *orig = dst;
+	int n;
 
-        if (src == NULL || *src == '\0') {
-                        if (node->options & LOG_OPT_QUOTE) {
-                                if (size > 2) {
-                                        *(dst++) = '"';
-                                        *(dst++) = '"';
-                                        *dst = '\0';
-                                        node->options |= LOG_OPT_WRITTEN;
-                                } else {
-                                        dst = NULL;
-                                        return dst;
-                                }
-                        } else {
-                                if (size > 1) {
-                                        *(dst++) = '-';
-                                        *dst = '\0';
-                                        node->options |= LOG_OPT_WRITTEN;
-                                } else { // error no space available
-                                        dst = NULL;
-                                        return dst;
-                                }
-                        }
-        } else {
-                if (node->options & LOG_OPT_QUOTE) {
-                        if (size-- > 1 ) {
-                                *(dst++) = '"';
-                        } else {
-                                dst = NULL;
-                                return NULL;
-                        }
-                        dst += strlcpy2(dst, src, size);
-                        size -= orig - dst + 1;
-                        if (size > 1) {
-                                *(dst++) = '"';
-                                *dst = '\0';
-                        } else {
-                                dst = NULL;
-                        }
-                } else {
-                        dst += strlcpy2(dst, src, size);
-                }
-        }
-        return dst;
+	if (src == NULL || *src == '\0') {
+		if (node->options & LOG_OPT_QUOTE) {
+			if (size > 2) {
+				*(dst++) = '"';
+				*(dst++) = '"';
+				*dst = '\0';
+				node->options |= LOG_OPT_WRITTEN;
+			} else {
+				dst = NULL;
+				return dst;
+			}
+		} else {
+			if (size > 1) {
+				*(dst++) = '-';
+				*dst = '\0';
+				node->options |= LOG_OPT_WRITTEN;
+			} else { // error no space available
+				dst = NULL;
+				return dst;
+			}
+		}
+	} else {
+		if (node->options & LOG_OPT_QUOTE) {
+			if (size-- > 1 ) {
+				*(dst++) = '"';
+			} else {
+				dst = NULL;
+				return NULL;
+			}
+			n = strlcpy2(dst, src, size);
+			size -= n;
+			dst += n;
+			if (size > 1) {
+				*(dst++) = '"';
+				*dst = '\0';
+			} else {
+				dst = NULL;
+			}
+		} else {
+			dst += strlcpy2(dst, src, size);
+		}
+	}
+	return dst;
 }
 
-/* generate the syslog header once a second */
-char *hdr_log(char *dst)
+/* Re-generate the syslog header at the beginning of logline once a second and
+ * return the pointer to the first character after the header.
+ */
+static char *update_log_hdr()
 {
-	int hdr_len = 0;
-	static long tvsec = -1;	/* to force the string to be initialized */
-	static char *dataptr = NULL;
+	static long tvsec;
+	static char *dataptr = NULL; /* backup of last end of header, NULL first time */
 
 	if (unlikely(date.tv_sec != tvsec || dataptr == NULL)) {
 		/* this string is rebuild only once a second */
 		struct tm tm;
+		int hdr_len;
 
 		tvsec = date.tv_sec;
 		get_localtime(tvsec, &tm);
 
-		hdr_len = snprintf(dst, MAX_SYSLOG_LEN,
+		hdr_len = snprintf(logline, MAX_SYSLOG_LEN,
 				   "<<<<>%s %2d %02d:%02d:%02d %s%s[%d]: ",
 				   monthname[tm.tm_mon],
 				   tm.tm_mday, tm.tm_hour, tm.tm_min, tm.tm_sec,
@@ -511,7 +550,7 @@ char *hdr_log(char *dst)
 		if (hdr_len < 0 || hdr_len > MAX_SYSLOG_LEN)
 			hdr_len = MAX_SYSLOG_LEN;
 
-		dataptr = dst + hdr_len;
+		dataptr = logline + hdr_len;
 	}
 
 	return dataptr;
@@ -524,23 +563,22 @@ char *hdr_log(char *dst)
 void send_log(struct proxy *p, int level, const char *format, ...)
 {
 	va_list argp;
-	static char logmsg[MAX_SYSLOG_LEN];
-	static char *dataptr = NULL;
-	int  data_len = 0;
+	char *dataptr;
+	int  data_len;
 
 	if (level < 0 || format == NULL)
 		return;
 
-	dataptr = hdr_log(logmsg); /* create header */
-	data_len = dataptr - logmsg;
+	dataptr = update_log_hdr(); /* update log header and skip it */
+	data_len = dataptr - logline;
 
 	va_start(argp, format);
-	data_len += vsnprintf(dataptr, MAX_SYSLOG_LEN, format, argp);
+	data_len += vsnprintf(dataptr, logline + sizeof(logline) - dataptr, format, argp);
 	if (data_len < 0 || data_len > MAX_SYSLOG_LEN)
 		data_len =  MAX_SYSLOG_LEN;
 	va_end(argp);
 
-	__send_log(p, level, logmsg, data_len);
+	__send_log(p, level, logline, data_len);
 }
 
 /*
@@ -618,7 +656,7 @@ void __send_log(struct proxy *p, int level, char *message, size_t size)
 		/* we can filter the level of the messages that are sent to each logger */
 		if (level > logsrv->level)
 			continue;
-	
+
 		/* For each target, we may have a different facility.
 		 * We can also have a different log level for each message.
 		 * This induces variations in the message header length.
@@ -635,7 +673,7 @@ void __send_log(struct proxy *p, int level, char *message, size_t size)
 		} while (fac_level && log_ptr > dataptr);
 		*log_ptr = '<';
 
-		sent = sendto(*plogfd, log_ptr, size,
+		sent = sendto(*plogfd, log_ptr, size + log_ptr - dataptr,
 			      MSG_DONTWAIT | MSG_NOSIGNAL,
 			      (struct sockaddr *)&logsrv->addr, get_addr_len(&logsrv->addr));
 		if (sent < 0) {
@@ -646,32 +684,65 @@ void __send_log(struct proxy *p, int level, char *message, size_t size)
 	}
 }
 
+extern fd_set hdr_encode_map[];
+extern fd_set url_encode_map[];
+
+
+const char sess_cookie[8]     = "NIDVEO67";	/* No cookie, Invalid cookie, cookie for a Down server, Valid cookie, Expired cookie, Old cookie, unknown */
+const char sess_set_cookie[8] = "NPDIRU67";	/* No set-cookie, Set-cookie found and left unchanged (passive),
+						   Set-cookie Deleted, Set-Cookie Inserted, Set-cookie Rewritten,
+						   Set-cookie Updated, unknown, unknown */
+
+#define LOGCHAR(x) do { \
+			if (tmplog < logline + MAX_SYSLOG_LEN - 1) { \
+				*(tmplog++) = (x);                     \
+			} else {                                       \
+				goto out;                              \
+			}                                              \
+		} while(0)
 
 /*
- * send a log for the session when we have enough info about it
+ * send a log for the session when we have enough info about it.
+ * Will not log if the frontend has no log defined.
  */
-void tcp_sess_log(struct session *s)
+void sess_log(struct session *s)
 {
 	char pn[INET6_ADDRSTRLEN];
+	char sn[INET6_ADDRSTRLEN];
 	struct proxy *fe = s->fe;
 	struct proxy *be = s->be;
 	struct proxy *prx_log;
+	struct http_txn *txn = &s->txn;
 	int tolog, level, err;
-	char *svid;
+	char *uri;
+	const char *svid;
 	struct tm tm;
+	int t_request;
+	int hdr;
+	int last_isspace = 1;
+	char *tmplog;
+	struct logformat_node *tmp;
 
 	/* if we don't want to log normal traffic, return now */
-	err = (s->flags & (SN_ERR_MASK | SN_REDISP)) || (s->req->cons->conn_retries != be->conn_retries);
+	err = (s->flags & (SN_ERR_MASK | SN_REDISP)) ||
+		(s->req->cons->conn_retries != be->conn_retries) ||
+		((s->fe->mode == PR_MODE_HTTP) && txn->status >= 500);
 	if (!err && (fe->options2 & PR_O2_NOLOGNORM))
 		return;
 
-	addr_to_str(&s->si[0].addr.from, pn, sizeof(pn));
-	get_localtime(s->logs.tv_accept.tv_sec, &tm);
-
-	if(LIST_ISEMPTY(&fe->logsrvs))
+	if (LIST_ISEMPTY(&fe->logsrvs))
 		return;
-
 	prx_log = fe;
+
+	if (addr_to_str(&s->req->prod->addr.from, pn, sizeof(pn)) == AF_UNIX)
+		snprintf(pn, sizeof(pn), "unix:%d", s->listener->luid);
+
+	if (be->options2 & PR_O2_SRC_ADDR) {
+	      if (addr_to_str(&s->req->cons->addr.from, sn, sizeof(sn)) == AF_UNIX)
+		snprintf(sn, sizeof(sn), "unix:%d", s->listener->luid);
+	}
+
+	/* FIXME: let's limit ourselves to frontend logging for now. */
 	tolog = fe->to_log;
 
 	if (!(tolog & LW_SVID))
@@ -688,31 +759,383 @@ void tcp_sess_log(struct session *s)
 		break;
 	}
 
+	t_request = -1;
+	if (tv_isge(&s->logs.tv_request, &s->logs.tv_accept))
+		t_request = tv_ms_elapsed(&s->logs.tv_accept, &s->logs.tv_request);
+
 	level = LOG_INFO;
 	if (err && (fe->options2 & PR_O2_LOGERRORS))
 		level = LOG_ERR;
 
-	send_log(prx_log, level, "%s:%d [%02d/%s/%04d:%02d:%02d:%02d.%03d]"
-		 " %s %s/%s %ld/%ld/%s%ld %s%lld"
-		 " %c%c %d/%d/%d/%d/%s%u %ld/%ld\n",
-		 s->si[0].addr.from.ss_family == AF_UNIX ? "unix" : pn,
-		 s->si[0].addr.from.ss_family == AF_UNIX ? s->listener->luid : get_host_port(&s->si[0].addr.from),
-		 tm.tm_mday, monthname[tm.tm_mon], tm.tm_year+1900,
-		 tm.tm_hour, tm.tm_min, tm.tm_sec, (int)s->logs.tv_accept.tv_usec/1000,
-		 fe->id, be->id, svid,
-		 (s->logs.t_queue >= 0) ? s->logs.t_queue : -1,
-		 (s->logs.t_connect >= 0) ? s->logs.t_connect - s->logs.t_queue : -1,
-		 (tolog & LW_BYTES) ? "" : "+", s->logs.t_close,
-		 (tolog & LW_BYTES) ? "" : "+", s->logs.bytes_out,
-		 sess_term_cond[(s->flags & SN_ERR_MASK) >> SN_ERR_SHIFT],
-		 sess_fin_state[(s->flags & SN_FINST_MASK) >> SN_FINST_SHIFT],
-		 actconn, fe->feconn, be->beconn, target_srv(&s->target) ? target_srv(&s->target)->cur_sess : 0,
-		 (s->flags & SN_REDISP)?"+":"",
-		 (s->req->cons->conn_retries>0)?(be->conn_retries - s->req->cons->conn_retries):be->conn_retries,
-		 s->logs.srv_queue_size, s->logs.prx_queue_size);
+	/* fill logbuffer */
 
+	tmplog = update_log_hdr(); /* update log header and skip it */
+
+	list_for_each_entry(tmp, &fe->logformat, list) {
+		char *src = NULL;
+		switch (tmp->type) {
+
+			case LOG_SEPARATOR:
+				if (!last_isspace) {
+					LOGCHAR(' ');
+					last_isspace = 1;
+					*tmplog = '\0';
+				}
+				break;
+
+			case LOG_TEXT: // text
+				src = tmp->arg;
+				tmplog += strlcpy2(tmplog, src, MAX_SYSLOG_LEN - (tmplog - logline));
+				if (tmplog > logline + MAX_SYSLOG_LEN - 2)
+					goto out;
+				last_isspace = 0;
+				break;
+
+			case LOG_CLIENTIP:  // %Ci
+				src = (s->req->prod->addr.from.ss_family == AF_UNIX) ? "unix" : pn;
+				tmplog = logformat_write_string(tmplog, src, MAX_SYSLOG_LEN - (tmplog - logline), tmp);
+				if (!tmplog)
+					goto out;
+				last_isspace = 0;
+				break;
+
+			case LOG_CLIENTPORT:  // %Cp
+				tmplog = ltoa_o((s->req->prod->addr.from.ss_family == AF_UNIX) ? s->listener->luid : get_host_port(&s->req->prod->addr.from),
+				                tmplog, MAX_SYSLOG_LEN - (tmplog - logline));
+				if (!tmplog)
+					goto out;
+				last_isspace = 0;
+				break;
+
+			case LOG_SOURCEIP:  // Bi
+				src = (s->req->cons->addr.from.ss_family == AF_UNIX) ? "unix" : sn;
+				tmplog = logformat_write_string(tmplog, src, MAX_SYSLOG_LEN - (tmplog - logline), tmp);
+				if (!tmplog)
+					goto out;
+				last_isspace = 0;
+				break;
+
+			case LOG_SOURCEPORT:  // %Bp
+				tmplog = ltoa_o((s->req->cons->addr.from.ss_family == AF_UNIX) ? s->listener->luid : get_host_port(&s->req->cons->addr.from),
+				                tmplog, MAX_SYSLOG_LEN - (tmplog - logline));
+				if (!tmplog)
+					goto out;
+				last_isspace = 0;
+				break;
+
+			case LOG_DATE: // %t
+				get_localtime(s->logs.accept_date.tv_sec, &tm);
+				tmplog = date2str_log(tmplog, &tm, &(s->logs.accept_date), MAX_SYSLOG_LEN - (tmplog - logline));
+				if (!tmplog)
+					goto out;
+				last_isspace = 0;
+				break;
+
+			case LOG_DATEGMT: // %T
+				get_gmtime(s->logs.accept_date.tv_sec, &tm);
+				tmplog = gmt2str_log(tmplog, &tm, MAX_SYSLOG_LEN - (tmplog - logline));
+				if (!tmplog)
+					goto out;
+				last_isspace = 0;
+				break;
+
+			case LOG_MS: // %ms
+				if ((MAX_SYSLOG_LEN - (tmplog - logline)) < 4) {
+					tmplog = NULL;
+					goto out;
+				}
+				tmplog = utoa_pad((unsigned int)s->logs.accept_date.tv_usec/1000,
+						  tmplog, 4);
+				if (!tmplog)
+					goto out;
+				last_isspace = 0;
+				break;
+
+			case LOG_FRONTEND: // %f
+				src = fe->id;
+				tmplog = logformat_write_string(tmplog, src, MAX_SYSLOG_LEN - (tmplog - logline), tmp);
+				if (!tmplog)
+					goto out;
+				last_isspace = 0;
+				break;
+
+			case LOG_BACKEND: // %b
+				src = be->id;
+				tmplog = logformat_write_string(tmplog, src, MAX_SYSLOG_LEN - (tmplog - logline), tmp);
+				if (!tmplog)
+					goto out;
+				last_isspace = 0;
+				break;
+
+			case LOG_SERVER: // %s
+				src = (char *)svid;
+				tmplog = logformat_write_string(tmplog, src, MAX_SYSLOG_LEN - (tmplog - logline), tmp);
+				if (!tmplog)
+					goto out;
+				last_isspace = 0;
+				break;
+
+			case LOG_TQ: // %Tq
+				tmplog = ltoa_o(t_request, tmplog, MAX_SYSLOG_LEN - (tmplog - logline));
+				if (!tmplog)
+					goto out;
+				last_isspace = 0;
+				break;
+
+			case LOG_TW: // %Tw
+				tmplog = ltoa_o((s->logs.t_queue >= 0) ? s->logs.t_queue - t_request : -1, tmplog, MAX_SYSLOG_LEN - (tmplog - logline));
+				if (!tmplog)
+					goto out;
+				last_isspace = 0;
+				break;
+
+			case LOG_TC: // %Tc
+				tmplog = ltoa_o((s->logs.t_connect >= 0) ? s->logs.t_connect - s->logs.t_queue : -1, tmplog, MAX_SYSLOG_LEN - (tmplog - logline));
+				if (!tmplog)
+					goto out;
+				last_isspace = 0;
+				break;
+
+			case LOG_TR: // %Tr
+				tmplog = ltoa_o((s->logs.t_data >= 0) ? s->logs.t_data - s->logs.t_connect : -1, tmplog, MAX_SYSLOG_LEN - (tmplog - logline));
+				if (!tmplog)
+					goto out;
+				last_isspace = 0;
+				break;
+
+			case LOG_TT:  // %Tt
+				if (!(tolog & LW_BYTES))
+					*(tmplog++) = '+';
+				tmplog = ltoa_o(s->logs.t_close, tmplog, MAX_SYSLOG_LEN - (tmplog - logline));
+				if (!tmplog)
+					goto out;
+				last_isspace = 0;
+				break;
+
+			case LOG_STATUS: // %st
+				tmplog = ltoa_o(txn->status, tmplog, MAX_SYSLOG_LEN - (tmplog - logline));
+				if (!tmplog)
+					goto out;
+				last_isspace = 0;
+				break;
+
+			case LOG_BYTES: // %B
+				if (!(tolog & LW_BYTES))
+					*(tmplog++) = '+';
+				tmplog = lltoa(s->logs.bytes_out, tmplog, MAX_SYSLOG_LEN - (tmplog - logline));
+				if (!tmplog)
+					goto out;
+				last_isspace = 0;
+				break;
+
+			case LOG_CCLIENT: // %cc
+				src = txn->cli_cookie;
+				tmplog = logformat_write_string(tmplog, src, MAX_SYSLOG_LEN - (tmplog - logline), tmp);
+				if (!tmplog)
+					goto out;
+				last_isspace = 0;
+				break;
+
+			case LOG_CSERVER: // %cs
+				src = txn->srv_cookie;
+				tmplog = logformat_write_string(tmplog, src, MAX_SYSLOG_LEN - (tmplog - logline), tmp);
+				if (!tmplog)
+					goto out;
+				last_isspace = 0;
+				break;
+
+			case LOG_TERMSTATE: // %ts
+				LOGCHAR(sess_term_cond[(s->flags & SN_ERR_MASK) >> SN_ERR_SHIFT]);
+				LOGCHAR(sess_fin_state[(s->flags & SN_FINST_MASK) >> SN_FINST_SHIFT]);
+				*tmplog = '\0';
+				last_isspace = 0;
+				break;
+
+			case LOG_TERMSTATE_CK: // %tsc, same as TS with cookie state (for mode HTTP)
+				LOGCHAR(sess_term_cond[(s->flags & SN_ERR_MASK) >> SN_ERR_SHIFT]);
+				LOGCHAR(sess_fin_state[(s->flags & SN_FINST_MASK) >> SN_FINST_SHIFT]);
+				LOGCHAR((be->options & PR_O_COOK_ANY) ? sess_cookie[(txn->flags & TX_CK_MASK) >> TX_CK_SHIFT] : '-');
+				LOGCHAR((be->options & PR_O_COOK_ANY) ? sess_set_cookie[(txn->flags & TX_SCK_MASK) >> TX_SCK_SHIFT] : '-');
+				*tmplog = '\0';
+				last_isspace = 0;
+				break;
+
+			case LOG_ACTCONN: // %ac
+				tmplog = ltoa_o(actconn, tmplog, MAX_SYSLOG_LEN - (tmplog - logline));
+				if (!tmplog)
+					goto out;
+				last_isspace = 0;
+				break;
+
+			case LOG_FECONN:  // %fc
+				tmplog = ltoa_o(fe->feconn, tmplog, MAX_SYSLOG_LEN - (tmplog - logline));
+				if (!tmplog)
+					goto out;
+				last_isspace = 0;
+				break;
+
+			case LOG_BECONN:  // %bc
+				tmplog = ltoa_o(be->beconn, tmplog, MAX_SYSLOG_LEN - (tmplog - logline));
+				if (!tmplog)
+					goto out;
+				last_isspace = 0;
+				break;
+
+			case LOG_SRVCONN:  // %sc
+				tmplog = ultoa_o(target_srv(&s->target) ? target_srv(&s->target)->cur_sess : 0, tmplog, MAX_SYSLOG_LEN - (tmplog - logline));
+				if (!tmplog)
+					goto out;
+				last_isspace = 0;
+				break;
+
+			case LOG_RETRIES:  // %rq
+				if (s->flags & SN_REDISP)
+					*(tmplog++) = '+';
+				tmplog = ltoa_o((s->req->cons->conn_retries>0)?(be->conn_retries - s->req->cons->conn_retries):be->conn_retries, tmplog, MAX_SYSLOG_LEN - (tmplog - logline));
+				if (!tmplog)
+					goto out;
+				last_isspace = 0;
+				break;
+
+			case LOG_SRVQUEUE: // %sq
+				tmplog = ltoa_o(s->logs.srv_queue_size, tmplog, MAX_SYSLOG_LEN - (tmplog - logline));
+				if (!tmplog)
+					goto out;
+				last_isspace = 0;
+				break;
+
+			case LOG_BCKQUEUE:  // %bq
+				tmplog = ltoa_o(s->logs.prx_queue_size, tmplog, MAX_SYSLOG_LEN - (tmplog - logline));
+				if (!tmplog)
+					goto out;
+				last_isspace = 0;
+				break;
+
+			case LOG_HDRREQUEST: // %hr
+				/* request header */
+				if (fe->to_log & LW_REQHDR && txn->req.cap) {
+					if (tmp->options & LOG_OPT_QUOTE)
+						LOGCHAR('"');
+					LOGCHAR('{');
+					for (hdr = 0; hdr < fe->nb_req_cap; hdr++) {
+						if (hdr)
+							LOGCHAR('|');
+						if (txn->req.cap[hdr] != NULL) {
+							tmplog = encode_string(tmplog, logline + MAX_SYSLOG_LEN,
+									       '#', hdr_encode_map, txn->req.cap[hdr]);
+							if (*tmplog != '\0')
+								goto out;
+						}
+					}
+					LOGCHAR('}');
+					if (tmp->options & LOG_OPT_QUOTE)
+						LOGCHAR('"');
+					last_isspace = 0;
+				}
+				*tmplog = '\0';
+				break;
+
+			case LOG_HDRREQUESTLIST: // %hrl
+				/* request header list */
+				if (fe->to_log & LW_REQHDR && txn->req.cap) {
+					for (hdr = 0; hdr < fe->nb_req_cap; hdr++) {
+						if (hdr > 0)
+							LOGCHAR(' ');
+						if (tmp->options & LOG_OPT_QUOTE)
+							LOGCHAR('"');
+						if (txn->req.cap[hdr] != NULL) {
+							tmplog = encode_string(tmplog, logline + MAX_SYSLOG_LEN,
+									       '#', hdr_encode_map, txn->req.cap[hdr]);
+							if (*tmplog != '\0')
+								goto out;
+
+						} else if (!(tmp->options & LOG_OPT_QUOTE))
+							LOGCHAR('-');
+						if (tmp->options & LOG_OPT_QUOTE)
+							LOGCHAR('"');
+						*tmplog = '\0';
+						last_isspace = 0;
+					}
+				}
+				break;
+
+			case LOG_HDRRESPONS: // %hs
+				/* response header */
+				if (fe->to_log & LW_RSPHDR &&
+				    txn->rsp.cap) {
+					if (tmp->options & LOG_OPT_QUOTE)
+						LOGCHAR('"');
+					LOGCHAR('{');
+					for (hdr = 0; hdr < fe->nb_rsp_cap; hdr++) {
+						if (hdr)
+							LOGCHAR('|');
+						if (txn->rsp.cap[hdr] != NULL) {
+							tmplog = encode_string(tmplog, logline + MAX_SYSLOG_LEN,
+									       '#', hdr_encode_map, txn->rsp.cap[hdr]);
+							if (*tmplog != '\0')
+								goto out;
+						}
+					}
+					LOGCHAR('}');
+					last_isspace = 0;
+					if (tmp->options & LOG_OPT_QUOTE)
+						LOGCHAR('"');
+				}
+				*tmplog = '\0';
+				break;
+
+			case LOG_HDRRESPONSLIST: // %hsl
+				/* response header list */
+				if (fe->to_log & LW_RSPHDR && txn->rsp.cap) {
+					for (hdr = 0; hdr < fe->nb_rsp_cap; hdr++) {
+						if (hdr > 0)
+							LOGCHAR(' ');
+						if (tmp->options & LOG_OPT_QUOTE)
+							LOGCHAR('"');
+						if (txn->rsp.cap[hdr] != NULL) {
+							tmplog = encode_string(tmplog, logline + MAX_SYSLOG_LEN,
+									       '#', hdr_encode_map, txn->rsp.cap[hdr]);
+							if (*tmplog != '\0')
+								goto out;
+						} else if (!(tmp->options & LOG_OPT_QUOTE))
+							LOGCHAR('-');
+						if (tmp->options & LOG_OPT_QUOTE)
+							LOGCHAR('"');
+						*tmplog = '\0';
+						last_isspace = 0;
+					}
+				}
+				break;
+
+			case LOG_REQ: // %r
+				/* Request */
+				if (tmp->options & LOG_OPT_QUOTE)
+					LOGCHAR('"');
+				uri = txn->uri ? txn->uri : "<BADREQ>";
+				tmplog = encode_string(tmplog, logline + MAX_SYSLOG_LEN,
+						       '#', url_encode_map, uri);
+				if (*tmplog != '\0')
+					goto out;
+				if (tmp->options & LOG_OPT_QUOTE)
+					LOGCHAR('"');
+				*tmplog = '\0';
+				last_isspace = 0;
+				break;
+		}
+	}
+
+out:
+
+	if (tmplog == NULL) // if previous error
+		tmplog = logline + MAX_SYSLOG_LEN - 1;
+
+	__send_log(prx_log, level, logline, tmplog - logline + 1);
 	s->logs.logwait = 0;
+
 }
+
+
+
 
 
 /*
