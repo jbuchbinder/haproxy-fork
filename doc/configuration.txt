@@ -47,6 +47,7 @@ Summary
 3.2.      Performance tuning
 3.3.      Debugging
 3.4.      Userlists
+3.5.      Peers
 
 4.    Proxies
 4.1.      Proxy keywords matrix
@@ -534,7 +535,7 @@ log <address> <facility> [max level [min level]]
   "emerg" messages on all terminals on some default syslog configurations.
   Eight levels are known :
 
-	  emerg  alert  crit   err    warning notice info  debug
+          emerg  alert  crit   err    warning notice info  debug
 
 log-send-hostname [<string>]
   Sets the hostname field in the syslog header. If optional "string" parameter
@@ -562,7 +563,7 @@ pidfile <pidfile>
   starting the process. See also "daemon".
 
 stats socket <path> [{uid | user} <uid>] [{gid | group} <gid>] [mode <mode>]
-  [level <level>]
+             [level <level>]
 
   Creates a UNIX socket in stream mode at location <path>. Any previously
   existing socket will be backed up then replaced. Connections to this socket
@@ -859,7 +860,7 @@ user <username> [password|insecure-password <password>]
 
 
 3.5. Peers
---------------
+----------
 It is possible to synchronize server entries in stick tables between several
 haproxy instances over TCP connections in a multi-master fashion. Each instance
 pushes its local updates and insertions to remote peers. Server IDs are used to
@@ -892,7 +893,7 @@ peer <peername> <ip>:<port>
   peer name. This makes it easier to maintain coherent configuration files
   across all peers.
 
-Example:
+  Example:
     peers mypeers
         peer haproxy1 192.168.0.1:1024
         peer haproxy2 192.168.0.2:1024
@@ -1117,7 +1118,10 @@ timeout server                            X          -         X         X
 timeout srvtimeout          (deprecated)  X          -         X         X
 timeout tarpit                            X          X         X         X
 transparent                 (deprecated)  X          -         X         X
+unique-id-format                          X          X         X         -
+unique-id-header                          X          X         X         -
 use_backend                               -          X         X         -
+use-server                                -          -         X         X
 ------------------------------------+----------+----------+---------+---------
  keyword                              defaults   frontend   listen    backend
 
@@ -1215,7 +1219,7 @@ backlog <conns>
   Arguments :
     <conns>   is the number of pending connections. Depending on the operating
               system, it may represent the number of already acknowledged
-	      connections, of non-acknowledged ones, or both.
+              connections, of non-acknowledged ones, or both.
 
   In order to protect against SYN flood attacks, one solution is to increase
   the system's SYN backlog size. Depending on the system, sometimes it is just
@@ -1279,13 +1283,18 @@ balance url_param <param> [check_post [<max_wait>]]
                   connection. The servers are choosen from the lowest numeric
                   identifier to the highest (see server parameter "id"), which
                   defaults to the server's position in the farm. Once a server
-                  reaaches its maxconn value, the next server is used. It does
+                  reaches its maxconn value, the next server is used. It does
                   not make sense to use this algorithm without setting maxconn.
                   The purpose of this algorithm is to always use the smallest
                   number of servers so that extra servers can be powered off
                   during non-intensive hours. This algorithm ignores the server
                   weight, and brings more benefit to long session such as RDP
-                  or IMAP than HTTP, though it can be useful there too.
+                  or IMAP than HTTP, though it can be useful there too. In
+                  order to use this algorithm efficiently, it is recommended
+                  that a cloud controller regularly checks server usage to turn
+                  them off when unused, and regularly checks backend queue to
+                  turn new servers on when the queue inflates. Alternatively,
+                  using "http-check send-state" may inform servers on the load.
 
       source      The source IP address is hashed and divided by the total
                   weight of the running servers to designate which server will
@@ -1330,25 +1339,25 @@ balance url_param <param> [check_post [<max_wait>]]
                   the query string of each HTTP GET request.
 
                   If the modifier "check_post" is used, then an HTTP POST
-		  request entity will be searched for the parameter argument,
-		  when it is not found in a query string after a question mark
-		  ('?') in the URL. Optionally, specify a number of octets to
-		  wait for before attempting to search the message body. If the
-		  entity can not be searched, then round robin is used for each
-		  request. For instance, if your clients always send the LB
-		  parameter in the first 128 bytes, then specify that. The
-		  default is 48. The entity data will not be scanned until the
-		  required number of octets have arrived at the gateway, this
-		  is the minimum of: (default/max_wait, Content-Length or first
-		  chunk length). If Content-Length is missing or zero, it does
-		  not need to wait for more data than the client promised to
-		  send. When Content-Length is present and larger than
-		  <max_wait>, then waiting is limited to <max_wait> and it is
-		  assumed that this will be enough data to search for the
-		  presence of the parameter. In the unlikely event that
-		  Transfer-Encoding: chunked is used, only the first chunk is
-		  scanned. Parameter values separated by a chunk boundary, may
-		  be randomly balanced if at all.
+                  request entity will be searched for the parameter argument,
+                  when it is not found in a query string after a question mark
+                  ('?') in the URL. Optionally, specify a number of octets to
+                  wait for before attempting to search the message body. If the
+                  entity can not be searched, then round robin is used for each
+                  request. For instance, if your clients always send the LB
+                  parameter in the first 128 bytes, then specify that. The
+                  default is 48. The entity data will not be scanned until the
+                  required number of octets have arrived at the gateway, this
+                  is the minimum of: (default/max_wait, Content-Length or first
+                  chunk length). If Content-Length is missing or zero, it does
+                  not need to wait for more data than the client promised to
+                  send. When Content-Length is present and larger than
+                  <max_wait>, then waiting is limited to <max_wait> and it is
+                  assumed that this will be enough data to search for the
+                  presence of the parameter. In the unlikely event that
+                  Transfer-Encoding: chunked is used, only the first chunk is
+                  scanned. Parameter values separated by a chunk boundary, may
+                  be randomly balanced if at all.
 
                   If the parameter is found followed by an equal sign ('=') and
                   a value, then the value is hashed and divided by the total
@@ -1364,11 +1373,11 @@ balance url_param <param> [check_post [<max_wait>]]
                   that changing a server's weight on the fly will have no
                   effect, but this can be changed using "hash-type".
 
-      hdr(<name>)   The HTTP header <name> will be looked up in each HTTP request.
-                  Just as with the equivalent ACL 'hdr()' function, the header
-                  name in parenthesis is not case sensitive. If the header is
-                  absent or if it does not contain any value, the roundrobin
-                  algorithm is applied instead.
+      hdr(<name>) The HTTP header <name> will be looked up in each HTTP
+                  request. Just as with the equivalent ACL 'hdr()' function,
+                  the header name in parenthesis is not case sensitive. If the
+                  header is absent or if it does not contain any value, the
+                  roundrobin algorithm is applied instead.
 
                   An optional 'use_domain_only' parameter is available, for
                   reducing the hash algorithm to the main domain part with some
@@ -1399,7 +1408,7 @@ balance url_param <param> [check_post [<max_wait>]]
                   changing a server's weight on the fly will have no effect,
                   but this can be changed using "hash-type".
 
-		  See also the rdp_cookie pattern fetch function.
+                  See also the rdp_cookie pattern fetch function.
 
     <arguments> is an optional list of arguments which may be needed by some
                 algorithms. Right now, only "url_param" and "uri" support an
@@ -2384,7 +2393,7 @@ http-check expect [!] <match> <pattern>
   Arguments :
     <match>   is a keyword indicating how to look for a specific pattern in the
               response. The keyword may be one of "status", "rstatus",
-	      "string", or "rstring". The keyword may be preceeded by an
+              "string", or "rstring". The keyword may be preceeded by an
               exclamation mark ("!") to negate the match. Spaces are allowed
               between the exclamation mark and the keyword. See below for more
               details on the supported keywords.
@@ -4233,7 +4242,7 @@ persist rdp-cookie(<name>)
             # apply RDP cookie persistence
             persist rdp-cookie
             # if server is unknown, let's balance on the same cookie.
-	    # alternatively, "balance leastconn" may be useful too.
+            # alternatively, "balance leastconn" may be useful too.
             balance rdp-cookie
             server srv1 1.1.1.1:3389
             server srv2 1.1.1.2:3389
@@ -5726,7 +5735,7 @@ stick-table type {ip | integer | string [len <length>] | binary [len <length>]}
                defined using the standard time format, similarly as the various
                timeouts. The maximum duration is slightly above 24 days. See
                section 2.2 for more information. If this delay is not specified,
-	       the session won't automatically expire, but older entries will
+               the session won't automatically expire, but older entries will
                be removed once full. Be sure not to use the "nopurge" parameter
                if not expiration delay is specified.
 
@@ -5927,7 +5936,7 @@ stick store-response <pattern> [table <table>] [{if | unless} <condition>]
     backend https
         mode tcp
         balance roundrobin
-	# maximum SSL session ID length is 32 bytes.
+        # maximum SSL session ID length is 32 bytes.
         stick-table type binary len 32 size 30k expire 30m
         
         acl clienthello req_ssl_hello_type 1
@@ -5949,7 +5958,7 @@ stick store-response <pattern> [table <table>] [{if | unless} <condition>]
 
         # Learn on response if server hello.
         stick store-response payload_lv(43,1) if serverhello
-	
+
         server s1 192.168.1.1:443
         server s2 192.168.1.1:443
 
@@ -6558,6 +6567,60 @@ transparent (deprecated)
 
   See also: "option transparent"
 
+unique-id-format <string>
+  Generate a unique ID for each request.
+  May be used in sections :   defaults | frontend | listen | backend
+                                  yes  |    yes   |   yes  |   no
+  Arguments :
+    <string>   is a log-format string.
+
+    This keyword creates a ID for each request using the custom log format. A
+    unique ID is useful to trace a request passing through many components of
+    a complex infrastructure. The newly created ID may also be logged using the
+    %ID tag the log-format string.
+
+    The format should be composed from elements that are guaranteed to be
+    unique when combined together. For instance, if multiple haproxy instances
+    are involved, it might be important to include the node name. It is often
+    needed to log the incoming connection's source and destination addresses
+    and ports. Note that since multiple requests may be performed over the same
+    connection, including a request counter may help differentiate them.
+    Similarly, a timestamp may protect against a rollover of the counter.
+    Logging the process ID will avoid collisions after a service restart.
+
+    It is recommended to use hexadecimal notation for many fields since it
+    makes them more compact and saves space in logs.
+
+    Example:
+
+        unique-id-format %{+X}o\ %Ci:%Cp_%Fi:%Fp_%Ts_%rt:%pid
+
+        will generate:
+
+               7F000001:8296_7F00001E:1F90_4F7B0A69_0003:790A
+
+  See also: "unique-id-header"
+
+unique-id-header <name>
+  Add a unique ID header in the HTTP request.
+  May be used in sections :   defaults | frontend | listen | backend
+                                  yes  |    yes   |   yes  |   no
+  Arguments :
+    <name>   is the name of the header.
+
+    Add a unique-id header in the HTTP request sent to the server, using the
+    unique-id-format. It can't work if the unique-id-format doesn't exist.
+
+    Example:
+
+        unique-id-format %{+X}o\ %Ci:%Cp_%Fi:%Fp_%Ts_%rt:%pid
+        unique-id-header X-Unique-ID
+
+        will generate:
+
+           X-Unique-ID: 7F000001:8296_7F00001E:1F90_4F7B0A69_0003:790A
+
+    See also: "unique-id-format"
 
 use_backend <backend> if <condition>
 use_backend <backend> unless <condition>
@@ -6595,6 +6658,60 @@ use_backend <backend> unless <condition>
   must decode several protocols on a unique port, one of them being HTTP.
 
   See also: "default_backend", "tcp-request", and section 7 about ACLs.
+
+
+use-server <server> if <condition>
+use-server <server> unless <condition>
+  Only use a specific server if/unless an ACL-based condition is matched.
+  May be used in sections :   defaults | frontend | listen | backend
+                                  no   |    no    |   yes  |   yes
+  Arguments :
+    <server>   is the name of a valid server in the same backend section.
+
+    <condition> is a condition composed of ACLs, as described in section 7.
+
+  By default, connections which arrive to a backend are load-balanced across
+  the available servers according to the configured algorithm, unless a
+  persistence mechanism such as a cookie is used and found in the request.
+
+  Sometimes it is desirable to forward a particular request to a specific
+  server without having to declare a dedicated backend for this server. This
+  can be achieved using the "use-server" rules. These rules are evaluated after
+  the "redirect" rules and before evaluating cookies, and they have precedence
+  on them. There may be as many "use-server" rules as desired. All of these
+  rules are evaluated in their declaration order, and the first one which
+  matches will assign the server.
+
+  If a rule designates a server which is down, and "option persist" is not used
+  and no force-persist rule was validated, it is ignored and evaluation goes on
+  with the next rules until one matches.
+
+  In the first form, the server will be used if the condition is met. In the
+  second form, the server will be used if the condition is not met. If no
+  condition is valid, the processing continues and the server will be assigned
+  according to other persistence mechanisms.
+
+  Note that even if a rule is matched, cookie processing is still performed but
+  does not assign the server. This allows prefixed cookies to have their prefix
+  stripped.
+
+  The "use-server" statement works both in HTTP and TCP mode. This makes it
+  suitable for use with content-based inspection. For instance, a server could
+  be selected in a farm according to the TLS SNI field. And if these servers
+  have their weight set to zero, they will not be used for other traffic.
+
+  Example :
+     # intercept incoming TLS requests based on the SNI field
+     use-server www if { req_ssl_sni -i www.example.com }
+     server     www 192.168.0.1:443 weight 0
+     use-server mail if { req_ssl_sni -i mail.example.com }
+     server     mail 192.168.0.1:587 weight 0
+     use-server imap if { req_ssl_sni -i imap.example.com }
+     server     mail 192.168.0.1:993 weight 0
+     # all the rest is forwarded to this server
+     server  default 192.168.0.2:443 check
+
+  See also: "use_backend", serction 5 about server and section 7 about ACLs.
 
 
 5. Server and default-server options
@@ -7745,6 +7862,69 @@ application layer (layer 7). Those require that a full HTTP request has been
 read, and are only evaluated then. They may require slightly more CPU resources
 than the layer 4 ones, but not much since the request and response are indexed.
 
+cook(<name>) <string>
+  All "cook*" matching criteria inspect all "Cookie" headers to find a cookie
+  with the name between parenthesis. If multiple occurrences of the cookie are
+  found in the request, they will all be evaluated. Spaces around the name and
+  the value are ignored as requested by the Cookie specification (RFC6265). The
+  cookie name is case-sensitive. Use the scook() variant for response cookies
+  sent by the server.
+
+  The "cook" criteria returns true if any of the request cookies <name> match
+  any of the strings. This can be used to check exact for values. For instance,
+  checking that the "profile" cookie is set to either "silver" or "gold" :
+
+     cook(profile) silver gold
+
+cook_beg(<name>) <string>
+  Returns true if any of the request cookies <name> begins with one of the
+  strings. See "cook" for more information on cookie matching. Use the
+  scook_beg() variant for response cookies sent by the server.
+
+cook_cnt(<name>) <integer>
+  Returns true when the number of occurrences of the specified cookie matches
+  the values or ranges specified. This is used to detect presence, absence or
+  abuse of a specific cookie. See "cook" for more information on header
+  matching. Use the scook_cnt() variant for response cookies sent by the
+  server.
+
+cook_dir(<name>) <string>
+  Returns true if any of the request cookies <name> contains one of the strings
+  either isolated or delimited by slashes. This is used to perform filename or
+  directory name matching, though it generally is of limited use with cookies.
+  See "cook" for more information on cookie matching. Use the scook_dir()
+  variant for response cookies sent by the server.
+
+cook_dom(<name>) <string>
+  Returns true if any of the request cookies <name> contains one of the strings
+  either isolated or delimited by dots. This is used to perform domain name
+  matching. See "cook" for more information on cookie matching. Use the
+  scook_dom() variant for response cookies sent by the server.
+
+cook_end(<name>) <string>
+  Returns true if any of the request cookies <name> ends with one of the
+  strings. See "cook" for more information on cookie matching. Use the
+  scook_end() variant for response cookies sent by the server.
+
+cook_len(<name>) <integer>
+  Returns true if any of the request cookies <name> has a length which matches
+  the values or ranges specified. This may be used to detect empty or too large
+  cookie values. Note that an absent cookie does not match a zero-length test.
+  See "cook" for more information on cookie matching. Use the scook_len()
+  variant for response cookies sent by the server.
+
+cook_reg(<name>) <regex>
+  Returns true if any of the request cookies <name> matches any of the regular
+  expressions. It can be used at any time, but it is important to remember that
+  regex matching is slower than other methods. See also other "cook_" criteria,
+  as well as "cook" for more information on cookie matching. Use the
+  scook_reg() variant for response cookies sent by the server.
+
+cook_sub(<name>) <string>
+  Returns true if any of the request cookies <name> contains at least one of
+  the strings. See "cook" for more information on cookie matching. Use the
+  scook_sub() variant for response cookies sent by the server.
+
 hdr <string>
 hdr(<header>) <string>
   Note: all the "hdr*" matching criteria either apply to all headers, or to a
@@ -7813,7 +7993,7 @@ hdr_len(<header>) <integer>
 
 hdr_reg <regex>
 hdr_reg(<header>) <regex>
-  Returns true when one of the headers matches of the regular expressions. It
+  Returns true it one of the headers matches one of the regular expressions. It
   can be used at any time, but it is important to remember that regex matching
   is slower than other methods. See also other "hdr_" criteria, as well as
   "hdr" for more information on header matching. Use the shdr_reg() variant for
@@ -8113,64 +8293,64 @@ The list of currently supported pattern fetch functions is the following :
                Ex: see SSL session id  example in "stick table" chapter.
                 
   url_param(<name>)
-	       This extracts the first occurrence of the parameter <name> in
-	       the query string of the request and uses the corresponding value
-               to match. A typical use is to get sticky session through url (e.g.
-	       http://example.com/foo?JESSIONID=some_id with
-	       url_param(JSESSIONID)), for cases where cookies cannot be used.
+               This extracts the first occurrence of the parameter <name> in
+               the query string of the request and uses the corresponding value
+               to match. A typical use is to get sticky session through url
+               (e.g. http://example.com/foo?JESSIONID=some_id with
+               url_param(JSESSIONID)), for cases where cookies cannot be used.
 
   rdp_cookie(<name>)
-	       This extracts the value of the rdp cookie <name> as a string
-	       and uses this value to match. This enables implementation of
-	       persistence based on the mstshash cookie. This is typically
-	       done if there is no msts cookie present.
+               This extracts the value of the rdp cookie <name> as a string
+               and uses this value to match. This enables implementation of
+               persistence based on the mstshash cookie. This is typically
+               done if there is no msts cookie present.
 
-	       This differs from "balance rdp-cookie" in that any balancing
-	       algorithm may be used and thus the distribution of clients
-	       to backend servers is not linked to a hash of the RDP
-	       cookie. It is envisaged that using a balancing algorithm
-	       such as "balance roundrobin" or "balance leastconnect" will
-	       lead to a more even distribution of clients to backend
-	       servers than the hash used by "balance rdp-cookie".
+               This differs from "balance rdp-cookie" in that any balancing
+               algorithm may be used and thus the distribution of clients
+               to backend servers is not linked to a hash of the RDP
+               cookie. It is envisaged that using a balancing algorithm
+               such as "balance roundrobin" or "balance leastconnect" will
+               lead to a more even distribution of clients to backend
+               servers than the hash used by "balance rdp-cookie".
 
-	       Example :
-		listen tse-farm
-		    bind 0.0.0.0:3389
-		    # wait up to 5s for an RDP cookie in the request
-		    tcp-request inspect-delay 5s
-		    tcp-request content accept if RDP_COOKIE
-		    # apply RDP cookie persistence
-		    persist rdp-cookie
-		    # Persist based on the mstshash cookie
-		    # This is only useful makes sense if
-		    # balance rdp-cookie is not used
-		    stick-table type string size 204800
-		    stick on rdp_cookie(mstshash)
-		    server srv1 1.1.1.1:3389
-		    server srv1 1.1.1.2:3389
+               Example :
+                listen tse-farm
+                    bind 0.0.0.0:3389
+                    # wait up to 5s for an RDP cookie in the request
+                    tcp-request inspect-delay 5s
+                    tcp-request content accept if RDP_COOKIE
+                    # apply RDP cookie persistence
+                    persist rdp-cookie
+                    # Persist based on the mstshash cookie
+                    # This is only useful makes sense if
+                    # balance rdp-cookie is not used
+                    stick-table type string size 204800
+                    stick on rdp_cookie(mstshash)
+                    server srv1 1.1.1.1:3389
+                    server srv1 1.1.1.2:3389
 
-	       See also : "balance rdp-cookie", "persist rdp-cookie",
-	       "tcp-request" and the "req_rdp_cookie" ACL.
+               See also : "balance rdp-cookie", "persist rdp-cookie",
+               "tcp-request" and the "req_rdp_cookie" ACL.
 
   cookie(<name>)
-	       This extracts the last occurrence of the cookie name <name> on a
-	       "Cookie" header line from the request and uses the corresponding
-	       value to match. A typical use is to get multiple clients sharing
-	       a same profile use the same server. This can be similar to what
-	       "appsession" does with the "request-learn" statement, but with
-	       support for multi-peer synchronization and state keeping across
-	       restarts.
+               This extracts the last occurrence of the cookie name <name> on a
+               "Cookie" header line from the request and uses the corresponding
+               value to match. A typical use is to get multiple clients sharing
+               a same profile use the same server. This can be similar to what
+               "appsession" does with the "request-learn" statement, but with
+               support for multi-peer synchronization and state keeping across
+               restarts.
 
-	       See also : "appsession"
+               See also : "appsession"
 
   set-cookie(<name>)
-	       This extracts the last occurrence of the cookie name <name> on a
-	       "Set-Cookie" header line from the response and uses the
-	       corresponding value to match. This can be comparable to what
-	       "appsession" does with default options, but with support for
-	        multi-peer synchronization and state keeping across restarts.
+               This extracts the last occurrence of the cookie name <name> on a
+               "Set-Cookie" header line from the response and uses the
+               corresponding value to match. This can be comparable to what
+               "appsession" does with default options, but with support for
+                multi-peer synchronization and state keeping across restarts.
 
-	       See also : "appsession"
+               See also : "appsession"
 
 
 The currently available list of transformations include :
@@ -8738,8 +8918,8 @@ Detailed fields description :
     is the reason why this field must always remain the last one.
 
 
-8.2.4 Custom log format
------------------------
+8.2.4. Custom log format
+------------------------
 
 The directive log-format allows you to custom the logs in http mode and tcp
 mode. It takes a string as argument.
@@ -8758,6 +8938,7 @@ HAproxy will automatically merge consecutive separators.
 
 Flags are :
   * Q: quote a string
+  * X: hexadecimal represenation (IPs, Ports, %Ts, %rt, %pid)
 
   Example:
 
@@ -8788,13 +8969,21 @@ Please refer to the table below for currently defined variables :
   |   | %o   | special variable, apply flags on all next var |             |
   +---+------+-----------------------------------------------+-------------+
   |   | %B   | bytes_read                                    | numeric     |
-  |   | %Ci  | client_ip                                     | string      |
+  |   | %Ci  | client_ip                                     | IP          |
   |   | %Cp  | client_port                                   | numeric     |
-  |   | %Bi  | backend_source_ip                             | string      |
+  |   | %Bi  | backend_source_ip                             | IP          |
   |   | %Bp  | backend_source_port                           | numeric     |
+  |   | %Fi  | frontend_ip                                   | IP          |
+  |   | %Fp  | frontend_port                                 | numeric     |
+  |   | %H   | hostname                                      | string      |
+  |   | %ID  | unique-id                                     | string      |
+  |   | %Si  | server_IP                                     | IP          |
+  |   | %Sp  | server_port                                   | numeric     |
+  |   | %T   | gmt_date_time                                 | date        |
   |   | %Tc  | Tc                                            | numeric     |
   | * | %Tq  | Tq                                            | numeric     |
   | * | %Tr  | Tr                                            | numeric     |
+  |   | %Ts  | timestamp                                     | numeric     |
   |   | %Tt  | Tt                                            | numeric     |
   |   | %Tw  | Tw                                            | numeric     |
   |   | %ac  | actconn                                       | numeric     |
@@ -8802,6 +8991,7 @@ Please refer to the table below for currently defined variables :
   |   | %bc  | beconn                                        | numeric     |
   |   | %bq  | backend_queue                                 | numeric     |
   | * | %cc  | captured_request_cookie                       | string      |
+  | * | %rt  | http_request_counter                          | numeric     |
   | * | %cs  | captured_response_cookie                      | string      |
   |   | %f   | frontend_name                                 | string      |
   |   | %fc  | feconn                                        | numeric     |
@@ -8810,17 +9000,19 @@ Please refer to the table below for currently defined variables :
   | * | %hs  | captured_response_headers default style       | string      |
   | * | %hsl | captured_response_headers CLF style           | string list |
   |   | %ms  | accept date milliseconds                      | numeric     |
+  |   | %pid | PID                                           | numeric     |
   | * | %r   | http_request                                  | string      |
   |   | %rc  | retries                                       | numeric     |
   |   | %s   | server_name                                   | string      |
   |   | %sc  | srv_conn                                      | numeric     |
   |   | %sq  | srv_queue                                     | numeric     |
   | * | %st  | status_code                                   | numeric     |
+  |   | %t   | date_time                                     | date        |
   |   | %ts  | termination_state                             | string      |
   | * | %tsc | termination_state with cookie status          | string      |
   +---+------+-----------------------------------------------+-------------+
 
-*: mode httplog only
+*: mode http only
 
 8.3. Advanced logging options
 -----------------------------
@@ -9129,6 +9321,10 @@ each of which has a special meaning :
             the cookie is consider too OLD and is ignored. The request will be
             redispatched just as if there was no cookie.
 
+        U : a cookie was present but was not used to select the server because
+            some other server selection mechanism was used instead (typically a
+            "use-server" rule).
+
         - : does not apply (no cookie set in configuration).
 
   - the last character reports what operations were performed on the persistence
@@ -9182,7 +9378,7 @@ easier finding and understanding.
 
      cD   The client did not send nor acknowledge any data for as long as the
           "timeout client" delay. This is often caused by network failures on
-	  the client side, or the client simply leaving the net uncleanly.
+          the client side, or the client simply leaving the net uncleanly.
 
      CH   The client aborted while waiting for the server to start responding.
           It might be the server taking too long to respond or the client
@@ -9267,7 +9463,7 @@ easier finding and understanding.
 
      PC   The proxy refused to establish a connection to the server because the
           process' socket limit has been reached while attempting to connect.
-	  The global "maxconn" parameter may be increased in the configuration
+          The global "maxconn" parameter may be increased in the configuration
           so that it does not happen anymore. This status is very rare and
           might happen when the global "ulimit-n" parameter is forced by hand.
 

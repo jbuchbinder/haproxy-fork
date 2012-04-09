@@ -184,7 +184,7 @@ static int peer_prepare_datamsg(struct stksess *ts, struct peer_session *ps, cha
  */
 static void peer_session_release(struct stream_interface *si)
 {
-	struct task *t= (struct task *)si->owner;
+	struct task *t = (struct task *)si->owner;
 	struct session *s = (struct session *)t->context;
 	struct peer_session *ps = (struct peer_session *)si->applet.private;
 
@@ -1044,6 +1044,7 @@ quit:
 static struct si_applet peer_applet = {
 	.name = "<PEER>", /* used for logging */
 	.fct = peer_io_handler,
+	.release = peer_session_release,
 };
 
 /*
@@ -1079,7 +1080,6 @@ int peer_accept(struct session *s)
 	 /* we have a dedicated I/O handler for the stats */
 	stream_int_register_handler(&s->si[1], &peer_applet);
 	copy_target(&s->target, &s->si[1].target); // for logging only
-	s->si[1].release = peer_session_release;
 	s->si[1].applet.private = s;
 	s->si[1].applet.st0 = PEER_SESSION_ACCEPT;
 
@@ -1156,6 +1156,8 @@ static struct session *peer_session_create(struct peer *peer, struct peer_sessio
 	s->si[0].err_type = SI_ET_NONE;
 	s->si[0].err_loc = NULL;
 	s->si[0].connect   = NULL;
+	s->si[0].get_src   = NULL;
+	s->si[0].get_dst   = NULL;
 	clear_target(&s->si[0].target);
 	s->si[0].exp = TICK_ETERNITY;
 	s->si[0].flags = SI_FL_NONE;
@@ -1165,7 +1167,6 @@ static struct session *peer_session_create(struct peer *peer, struct peer_sessio
 	s->si[0].applet.st0 = PEER_SESSION_CONNECT;
 
 	stream_int_register_handler(&s->si[0], &peer_applet);
-	s->si[0].release = peer_session_release;
 
 	s->si[1].fd = -1; /* just to help with debugging */
 	s->si[1].owner = t;
@@ -1174,6 +1175,8 @@ static struct session *peer_session_create(struct peer *peer, struct peer_sessio
 	s->si[1].err_type = SI_ET_NONE;
 	s->si[1].err_loc = NULL;
 	s->si[1].connect = tcp_connect_server;
+	s->si[1].get_src = getsockname;
+	s->si[1].get_dst = getpeername;
 	set_target_proxy(&s->si[1].target, s->be);
 	s->si[1].exp = TICK_ETERNITY;
 	s->si[1].flags = SI_FL_NONE;

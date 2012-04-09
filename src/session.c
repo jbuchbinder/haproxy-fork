@@ -169,6 +169,8 @@ int session_accept(struct listener *l, int cfd, struct sockaddr_storage *addr)
 	s->si[0].err_loc   = NULL;
 	s->si[0].connect   = NULL;
 	s->si[0].release   = NULL;
+	s->si[0].get_src   = getpeername;
+	s->si[0].get_dst   = getsockname;
 	clear_target(&s->si[0].target);
 	s->si[0].exp       = TICK_ETERNITY;
 	s->si[0].flags     = SI_FL_NONE;
@@ -193,6 +195,8 @@ int session_accept(struct listener *l, int cfd, struct sockaddr_storage *addr)
 	s->si[1].err_loc   = NULL;
 	s->si[1].connect   = NULL;
 	s->si[1].release   = NULL;
+	s->si[1].get_src   = NULL;
+	s->si[1].get_dst   = NULL;
 	clear_target(&s->si[1].target);
 	s->si[1].shutr     = stream_int_shutr;
 	s->si[1].shutw     = stream_int_shutw;
@@ -1041,6 +1045,55 @@ static int process_switching_rules(struct session *s, struct buffer *req, int an
 	return 0;
 }
 
+/* This stream analyser works on a request. It applies all use-server rules on
+ * it then returns 1. The data must already be present in the buffer otherwise
+ * they won't match. It always returns 1.
+ */
+static int process_server_rules(struct session *s, struct buffer *req, int an_bit)
+{
+	struct proxy *px = s->be;
+	struct server_rule *rule;
+
+	DPRINTF(stderr,"[%u] %s: session=%p b=%p, exp(r,w)=%u,%u bf=%08x bl=%d analysers=%02x\n",
+		now_ms, __FUNCTION__,
+		s,
+		req,
+		req->rex, req->wex,
+		req->flags,
+		req->l,
+		req->analysers);
+
+	if (!(s->flags & SN_ASSIGNED)) {
+		list_for_each_entry(rule, &px->server_rules, list) {
+			int ret;
+
+			ret = acl_exec_cond(rule->cond, s->be, s, &s->txn, ACL_DIR_REQ);
+			ret = acl_pass(ret);
+			if (rule->cond->pol == ACL_COND_UNLESS)
+				ret = !ret;
+
+			if (ret) {
+				struct server *srv = rule->srv.ptr;
+
+				if ((srv->state & SRV_RUNNING) ||
+				    (px->options & PR_O_PERSIST) ||
+				    (s->flags & SN_FORCE_PRST)) {
+					s->flags |= SN_DIRECT | SN_ASSIGNED;
+					set_target_server(&s->target, srv);
+					break;
+				}
+				/* if the server is not UP, let's go on with next rules
+				 * just in case another one is suited.
+				 */
+			}
+		}
+	}
+
+	req->analysers &= ~an_bit;
+	req->analyse_exp = TICK_ETERNITY;
+	return 1;
+}
+
 /* This stream analyser works on a request. It applies all sticking rules on
  * it then returns 1. The data must already be present in the buffer otherwise
  * they won't match. It always returns 1.
@@ -1524,6 +1577,12 @@ struct task *process_session(struct task *t)
 					if (!http_process_tarpit(s, s->req, AN_REQ_HTTP_TARPIT))
 						break;
 					UPDATE_ANALYSERS(s->req->analysers, ana_list, ana_back, AN_REQ_HTTP_TARPIT);
+				}
+
+				if (ana_list & AN_REQ_SRV_RULES) {
+					if (!process_server_rules(s, s->req, AN_REQ_SRV_RULES))
+						break;
+					UPDATE_ANALYSERS(s->req->analysers, ana_list, ana_back, AN_REQ_SRV_RULES);
 				}
 
 				if (ana_list & AN_REQ_HTTP_INNER) {

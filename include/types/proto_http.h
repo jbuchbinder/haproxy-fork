@@ -43,6 +43,7 @@
 #define TX_CK_VALID	0x00000060	/* this session had cookie matching a valid server */
 #define TX_CK_EXPIRED	0x00000080	/* this session had an expired cookie (idle for too long) */
 #define TX_CK_OLD	0x000000A0	/* this session had too old a cookie (offered too long ago) */
+#define TX_CK_UNUSED	0x000000C0	/* this session had a cookie but it was not used (eg: use-server was preferred) */
 #define TX_CK_MASK	0x000000E0	/* mask to get this session's cookie flags */
 #define TX_CK_SHIFT	5		/* bit shift */
 
@@ -249,6 +250,26 @@ enum {
 	HTTP_ERR_503,
 	HTTP_ERR_504,
 	HTTP_ERR_SIZE
+};
+
+/* Actions available for the stats admin forms */
+enum {
+	ST_ADM_ACTION_NONE = 0,
+	ST_ADM_ACTION_DISABLE,
+	ST_ADM_ACTION_ENABLE,
+};
+
+/* status codes available for the stats admin page */
+enum {
+	STAT_STATUS_INIT = 0,
+	STAT_STATUS_DENY,	/* action denied */
+	STAT_STATUS_DONE,	/* the action is successful */
+	STAT_STATUS_ERRP,	/* an error occured due to invalid values in parameters */
+	STAT_STATUS_EXCD,	/* an error occured because the buffer couldn't store all data */
+	STAT_STATUS_NONE,	/* nothing happened (no action chosen or servers state didn't change) */
+	STAT_STATUS_PART,	/* the action is partially successful */
+	STAT_STATUS_UNKN,	/* an unknown error occured, shouldn't happen */
+	STAT_STATUS_SIZE
 };
 
 /* This is an HTTP message, as described in RFC2616. It can be either a request

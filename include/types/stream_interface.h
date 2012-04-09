@@ -73,6 +73,8 @@ enum {
 	SI_FL_INDEP_STR  = 0x0040,  /* independant streams = don't update rex on write */
 	SI_FL_NOLINGER   = 0x0080,  /* may close without lingering. One-shot. */
 	SI_FL_SRC_ADDR   = 0x1000,  /* get the source ip/port with getsockname */
+	SI_FL_TO_SET     = 0x2000,  /* addr.to is set */
+	SI_FL_FROM_SET   = 0x4000,  /* addr.from is set */
 };
 
 /* target types */
@@ -131,6 +133,8 @@ struct stream_interface {
 	void (*chk_snd)(struct stream_interface *);/* chk_snd function */
 	int  (*connect)(struct stream_interface *); /* connect function if any */
 	void (*release)(struct stream_interface *); /* handler to call after the last close() */
+	int (*get_src)(int, struct sockaddr *, socklen_t *); /* syscall used to retrieve src addr */
+	int (*get_dst)(int, struct sockaddr *, socklen_t *); /* syscall used to retrieve dst addr */
 
 	/* struct members below are the "remote" part, as seen from the buffer side */
 	struct target target;	/* the target to connect to (server, proxy, applet, ...) */
@@ -149,11 +153,11 @@ struct stream_interface {
 				int px_st;		/* STAT_PX_ST* */
 				unsigned int flags;	/* STAT_* */
 				int iid, type, sid;	/* proxy id, type and service id if bounding of stats is enabled */
-				const char *st_code;	/* pointer to the status code returned by an action */
 #ifdef USE_API
 				const char *api_action; /* pointer to the API method being called */
 				const char *api_data;
 #endif /* USE_API */
+				int st_code;		/* the status code returned by an action */
 			} stats;
 			struct {
 				struct bref bref;	/* back-reference from the session being dumped */
@@ -193,6 +197,7 @@ struct stream_interface {
 struct si_applet {
 	char *name; /* applet's name to report in logs */
 	void (*fct)(struct stream_interface *);  /* internal I/O handler, may never be NULL */
+	void (*release)(struct stream_interface *);  /* callback to release resources, may be NULL */
 };
 
 #endif /* _TYPES_STREAM_INTERFACE_H */

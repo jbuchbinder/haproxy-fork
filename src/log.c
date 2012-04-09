@@ -30,8 +30,10 @@
 #include <types/global.h>
 #include <types/log.h>
 
+#include <proto/frontend.h>
 #include <proto/log.h>
 #include <proto/stream_interface.h>
+#include <proto/stream_sock.h>
 
 const char *log_facilities[NB_LOG_FACILITIES] = {
 	"kern", "user", "mail", "daemon",
@@ -57,6 +59,7 @@ struct logformat_type {
 	char *name;
 	int type;
 	int mode;
+	int lw; /* logwait bitsfield */
 	int (*config_callback)(struct logformat_node *node, struct proxy *curproxy);
 };
 
@@ -64,41 +67,50 @@ int prepare_addrsource(struct logformat_node *node, struct proxy *curproxy);
 
 /* log_format variable names */
 static const struct logformat_type logformat_keywords[] = {
-	{ "o", LOG_GLOBAL, PR_MODE_TCP, NULL },  /* global option */
-	{ "Ci", LOG_CLIENTIP, PR_MODE_TCP, NULL },  /* client ip */
-	{ "Cp", LOG_CLIENTPORT, PR_MODE_TCP, NULL }, /* client port */
-	{ "Bp", LOG_SOURCEPORT, PR_MODE_TCP, prepare_addrsource }, /* backend source port */
-	{ "Bi", LOG_SOURCEIP, PR_MODE_TCP, prepare_addrsource }, /* backend source ip */
-	{ "t", LOG_DATE, PR_MODE_TCP, NULL },      /* date */
-	{ "T", LOG_DATEGMT, PR_MODE_TCP, NULL },   /* date GMT */
-	{ "ms", LOG_MS, PR_MODE_TCP, NULL },       /* accept date millisecond */
-	{ "f", LOG_FRONTEND, PR_MODE_TCP, NULL },  /* frontend */
-	{ "b", LOG_BACKEND, PR_MODE_TCP, NULL },   /* backend */
-	{ "s", LOG_SERVER, PR_MODE_TCP, NULL },    /* server */
-	{ "B", LOG_BYTES, PR_MODE_TCP, NULL },     /* bytes read */
-	{ "Tq", LOG_TQ, PR_MODE_HTTP, NULL },       /* Tq */
-	{ "Tw", LOG_TW, PR_MODE_TCP, NULL },       /* Tw */
-	{ "Tc", LOG_TC, PR_MODE_TCP, NULL },       /* Tc */
-	{ "Tr", LOG_TR, PR_MODE_HTTP, NULL },       /* Tr */
-	{ "Tt", LOG_TT, PR_MODE_TCP, NULL },       /* Tt */
-	{ "st", LOG_STATUS, PR_MODE_HTTP, NULL },   /* status code */
-	{ "cc", LOG_CCLIENT, PR_MODE_HTTP, NULL },  /* client cookie */
-	{ "cs", LOG_CSERVER, PR_MODE_HTTP, NULL },  /* server cookie */
-	{ "ts", LOG_TERMSTATE, PR_MODE_TCP, NULL },/* terminaison state */
-	{ "tsc", LOG_TERMSTATE_CK, PR_MODE_HTTP, NULL },/* terminaison state with cookie status */
-	{ "ac", LOG_ACTCONN, PR_MODE_TCP, NULL },  /* actconn */
-	{ "fc", LOG_FECONN, PR_MODE_TCP, NULL },   /* feconn */
-	{ "bc", LOG_BECONN, PR_MODE_TCP, NULL },   /* beconn */
-	{ "sc", LOG_SRVCONN, PR_MODE_TCP, NULL },  /* srv_conn */
-	{ "rc", LOG_RETRIES, PR_MODE_TCP, NULL },  /* retries */
-	{ "sq", LOG_SRVQUEUE, PR_MODE_TCP, NULL  }, /* srv_queue */
-	{ "bq", LOG_BCKQUEUE, PR_MODE_TCP, NULL }, /* backend_queue */
-	{ "hr", LOG_HDRREQUEST, PR_MODE_HTTP, NULL }, /* header request */
-	{ "hs", LOG_HDRRESPONS, PR_MODE_HTTP, NULL },  /* header response */
-	{ "hrl", LOG_HDRREQUESTLIST, PR_MODE_HTTP, NULL }, /* header request list */
-	{ "hsl", LOG_HDRRESPONSLIST, PR_MODE_HTTP, NULL },  /* header response list */
-	{ "r", LOG_REQ, PR_MODE_HTTP, NULL },  /* request */
-	{ 0, 0, 0, NULL }
+	{ "o", LOG_FMT_GLOBAL, PR_MODE_TCP, 0, NULL },  /* global option */
+	{ "Ci", LOG_FMT_CLIENTIP, PR_MODE_TCP, LW_CLIP, NULL },  /* client ip */
+	{ "Cp", LOG_FMT_CLIENTPORT, PR_MODE_TCP, LW_CLIP, NULL }, /* client port */
+	{ "Bp", LOG_FMT_BACKENDPORT, PR_MODE_TCP, LW_BCKIP, prepare_addrsource }, /* backend source port */
+	{ "Bi", LOG_FMT_BACKENDIP, PR_MODE_TCP, LW_BCKIP, prepare_addrsource }, /* backend source ip */
+	{ "Fp", LOG_FMT_FRONTENDPORT, PR_MODE_TCP, LW_FRTIP, NULL }, /* frontend port */
+	{ "Fi", LOG_FMT_FRONTENDIP, PR_MODE_TCP, LW_FRTIP, NULL }, /* frontend ip */
+	{ "Sp", LOG_FMT_SERVERPORT, PR_MODE_TCP, LW_SVIP, NULL }, /* server destination port */
+	{ "Si", LOG_FMT_SERVERIP, PR_MODE_TCP, LW_SVIP, NULL }, /* server destination ip */
+	{ "t", LOG_FMT_DATE, PR_MODE_TCP, LW_INIT, NULL },      /* date */
+	{ "T", LOG_FMT_DATEGMT, PR_MODE_TCP, LW_INIT, NULL },   /* date GMT */
+	{ "Ts", LOG_FMT_TS, PR_MODE_TCP, LW_INIT, NULL },   /* timestamp GMT */
+	{ "ms", LOG_FMT_MS, PR_MODE_TCP, LW_INIT, NULL },       /* accept date millisecond */
+	{ "f", LOG_FMT_FRONTEND, PR_MODE_TCP, LW_INIT, NULL },  /* frontend */
+	{ "b", LOG_FMT_BACKEND, PR_MODE_TCP, LW_INIT, NULL },   /* backend */
+	{ "s", LOG_FMT_SERVER, PR_MODE_TCP, LW_SVID, NULL },    /* server */
+	{ "B", LOG_FMT_BYTES, PR_MODE_TCP, LW_BYTES, NULL },     /* bytes read */
+	{ "Tq", LOG_FMT_TQ, PR_MODE_HTTP, LW_BYTES, NULL },       /* Tq */
+	{ "Tw", LOG_FMT_TW, PR_MODE_TCP, LW_BYTES, NULL },       /* Tw */
+	{ "Tc", LOG_FMT_TC, PR_MODE_TCP, LW_BYTES, NULL },       /* Tc */
+	{ "Tr", LOG_FMT_TR, PR_MODE_HTTP, LW_BYTES, NULL },       /* Tr */
+	{ "Tt", LOG_FMT_TT, PR_MODE_TCP, LW_BYTES, NULL },       /* Tt */
+	{ "st", LOG_FMT_STATUS, PR_MODE_HTTP, LW_RESP, NULL },   /* status code */
+	{ "cc", LOG_FMT_CCLIENT, PR_MODE_HTTP, LW_REQHDR, NULL },  /* client cookie */
+	{ "cs", LOG_FMT_CSERVER, PR_MODE_HTTP, LW_RSPHDR, NULL },  /* server cookie */
+	{ "ts", LOG_FMT_TERMSTATE, PR_MODE_TCP, LW_BYTES, NULL },/* termination state */
+	{ "tsc", LOG_FMT_TERMSTATE_CK, PR_MODE_TCP, LW_INIT, NULL },/* termination state */
+	{ "ac", LOG_FMT_ACTCONN, PR_MODE_TCP, LW_BYTES, NULL },  /* actconn */
+	{ "fc", LOG_FMT_FECONN, PR_MODE_TCP, LW_BYTES, NULL },   /* feconn */
+	{ "bc", LOG_FMT_BECONN, PR_MODE_TCP, LW_BYTES, NULL },   /* beconn */
+	{ "sc", LOG_FMT_SRVCONN, PR_MODE_TCP, LW_BYTES, NULL },  /* srv_conn */
+	{ "rc", LOG_FMT_RETRIES, PR_MODE_TCP, LW_BYTES, NULL },  /* retries */
+	{ "sq", LOG_FMT_SRVQUEUE, PR_MODE_TCP, LW_BYTES, NULL  }, /* srv_queue */
+	{ "bq", LOG_FMT_BCKQUEUE, PR_MODE_TCP, LW_BYTES, NULL }, /* backend_queue */
+	{ "hr", LOG_FMT_HDRREQUEST, PR_MODE_HTTP, LW_REQHDR, NULL }, /* header request */
+	{ "hs", LOG_FMT_HDRRESPONS, PR_MODE_HTTP, LW_RSPHDR, NULL },  /* header response */
+	{ "hrl", LOG_FMT_HDRREQUESTLIST, PR_MODE_HTTP, LW_REQHDR, NULL }, /* header request list */
+	{ "hsl", LOG_FMT_HDRRESPONSLIST, PR_MODE_HTTP, LW_RSPHDR, NULL },  /* header response list */
+	{ "r", LOG_FMT_REQ, PR_MODE_HTTP, LW_REQ, NULL },  /* request */
+	{ "pid", LOG_FMT_PID, PR_MODE_TCP, LW_INIT, NULL }, /* log pid */
+	{ "rt", LOG_FMT_COUNTER, PR_MODE_HTTP, LW_REQ, NULL }, /* HTTP request counter */
+	{ "H", LOG_FMT_HOSTNAME, PR_MODE_TCP, LW_INIT, NULL }, /* Hostname */
+	{ "ID", LOG_FMT_UNIQUEID, PR_MODE_HTTP, LW_BYTES, NULL }, /* Unique ID */
+	{ 0, 0, 0, 0, NULL }
 };
 
 char default_http_log_format[] = "%Ci:%Cp [%t] %f %b/%s %Tq/%Tw/%Tc/%Tr/%Tt %st %B %cc %cs %tsc %ac/%fc/%bc/%sc/%rc %sq/%bq %hr %hs %{+Q}r"; // default format
@@ -120,6 +132,7 @@ struct logformat_var_args var_args_list[] = {
 // global
 	{ "M", LOG_OPT_MANDATORY },
 	{ "Q", LOG_OPT_QUOTE },
+	{ "X", LOG_OPT_HEXA },
 	{  0,  0 }
 };
 
@@ -188,7 +201,7 @@ int parse_logformat_var_args(char *args, struct logformat_node *node)
  * Parse a variable '%varname' or '%{args}varname' in logformat
  *
  */
-int parse_logformat_var(char *str, size_t len, struct proxy *curproxy, int *defoptions)
+int parse_logformat_var(char *str, size_t len, struct proxy *curproxy, struct list *list_format, int *defoptions)
 {
 	int i, j;
 	char *arg = NULL; // arguments
@@ -218,7 +231,7 @@ int parse_logformat_var(char *str, size_t len, struct proxy *curproxy, int *defo
 						node->options = *defoptions;
 						node->arg = arg;
 						parse_logformat_var_args(node->arg, node);
-						if (node->type == LOG_GLOBAL) {
+						if (node->type == LOG_FMT_GLOBAL) {
 							*defoptions = node->options;
 							free(node);
 						} else {
@@ -227,7 +240,8 @@ int parse_logformat_var(char *str, size_t len, struct proxy *curproxy, int *defo
 									return -1;
 								 }
 							}
-							LIST_ADDQ(&curproxy->logformat, &node->list);
+							curproxy->to_log |= logformat_keywords[j].lw;
+							LIST_ADDQ(list_format, &node->list);
 						}
 						return 0;
 					} else {
@@ -253,28 +267,27 @@ int parse_logformat_var(char *str, size_t len, struct proxy *curproxy, int *defo
  *  start: start pointer
  *  end: end text pointer
  *  type: string type
+ *  list_format: destination list
  *
  *  LOG_TEXT: copy chars from start to end excluding end.
  *
 */
-void add_to_logformat_list(char *start, char *end, int type, struct proxy *curproxy)
+void add_to_logformat_list(char *start, char *end, int type, struct list *list_format)
 {
 	char *str;
 
-	if (type == LOG_TEXT) { /* type text */
+	if (type == LOG_FMT_TEXT) { /* type text */
 		struct logformat_node *node = calloc(1, sizeof(struct logformat_node));
-
 		str = calloc(end - start + 1, 1);
 		strncpy(str, start, end - start);
-
 		str[end - start] = '\0';
 		node->arg = str;
-		node->type = LOG_TEXT; // type string
-		LIST_ADDQ(&curproxy->logformat, &node->list);
-	} else if (type == LOG_SEPARATOR) {
+		node->type = LOG_FMT_TEXT; // type string
+		LIST_ADDQ(list_format, &node->list);
+	} else if (type == LOG_FMT_SEPARATOR) {
 		struct logformat_node *node = calloc(1, sizeof(struct logformat_node));
-		node->type = LOG_SEPARATOR;
-		LIST_ADDQ(&curproxy->logformat, &node->list);
+		node->type = LOG_FMT_SEPARATOR;
+		LIST_ADDQ(list_format, &node->list);
 	}
 }
 
@@ -282,8 +295,13 @@ void add_to_logformat_list(char *start, char *end, int type, struct proxy *curpr
  * Parse the log_format string and fill a linked list.
  * Variable name are preceded by % and composed by characters [a-zA-Z0-9]* : %varname
  * You can set arguments using { } : %{many arguments}varname
+ *
+ *  str: the string to parse
+ *  curproxy: the proxy affected
+ *  list_format: the destination list
+ *  capabilities: PR_MODE_TCP_ | PR_MODE_HTTP
  */
-void parse_logformat_string(char *str, struct proxy *curproxy)
+void parse_logformat_string(char *str, struct proxy *curproxy, struct list *list_format, int capabilities)
 {
 	char *sp = str; /* start pointer */
 	int cformat = -1; /* current token format : LOG_TEXT, LOG_SEPARATOR, LOG_VARIABLE */
@@ -291,8 +309,10 @@ void parse_logformat_string(char *str, struct proxy *curproxy)
 	struct logformat_node *tmplf, *back;
 	int options = 0;
 
+	curproxy->to_log = LW_INIT;
+
 	/* flush the list first. */
-	list_for_each_entry_safe(tmplf, back, &curproxy->logformat, list) {
+	list_for_each_entry_safe(tmplf, back, list_format, list) {
 		LIST_DEL(&tmplf->list);
 		free(tmplf);
 	}
@@ -308,9 +328,9 @@ void parse_logformat_string(char *str, struct proxy *curproxy)
 				if (pformat > LF_VAR) // unfinished string
 					pformat = LF_TEXT;
 				if (pformat == LF_VAR)
-					parse_logformat_var(sp, str - sp, curproxy, &options);
+					parse_logformat_var(sp, str - sp, curproxy, list_format, &options);
 				else
-					add_to_logformat_list(sp, str, pformat, curproxy);
+					add_to_logformat_list(sp, str, pformat, list_format);
 				sp = str;
 				if (*str == '\0')
 					break;
@@ -468,11 +488,11 @@ int get_log_facility(const char *fac)
 
 /*
  * Write a string in the log string
- * Take cares of mandatory and quote options
+ * Take cares of quote options
  *
  * Return the adress of the \0 character, or NULL on error
  */
-char *logformat_write_string(char *dst, char *src, size_t size, struct logformat_node *node)
+char *lf_text(char *dst, char *src, size_t size, struct logformat_node *node)
 {
 	int n;
 
@@ -482,7 +502,6 @@ char *logformat_write_string(char *dst, char *src, size_t size, struct logformat
 				*(dst++) = '"';
 				*(dst++) = '"';
 				*dst = '\0';
-				node->options |= LOG_OPT_WRITTEN;
 			} else {
 				dst = NULL;
 				return dst;
@@ -491,7 +510,6 @@ char *logformat_write_string(char *dst, char *src, size_t size, struct logformat
 			if (size > 1) {
 				*(dst++) = '-';
 				*dst = '\0';
-				node->options |= LOG_OPT_WRITTEN;
 			} else { // error no space available
 				dst = NULL;
 				return dst;
@@ -519,6 +537,54 @@ char *logformat_write_string(char *dst, char *src, size_t size, struct logformat
 		}
 	}
 	return dst;
+}
+
+/*
+ * Write a IP adress to the log string
+ * +X option write in hexadecimal notation, most signifant byte on the left
+ */
+char *lf_ip(char *dst, struct sockaddr *sockaddr, size_t size, struct logformat_node *node)
+{
+	char *ret = dst;
+	int iret;
+	char pn[INET6_ADDRSTRLEN];
+
+	if (node->options & LOG_OPT_HEXA) {
+		const unsigned char *addr = (const unsigned char *)&((struct sockaddr_in *)sockaddr)->sin_addr.s_addr;
+		iret = snprintf(dst, size, "%02X%02X%02X%02X", addr[0], addr[1], addr[2], addr[3]);
+		if (iret < 0 || iret > size)
+			return NULL;
+		ret += iret;
+	} else {
+		addr_to_str((struct sockaddr_storage *)sockaddr, pn, sizeof(pn));
+		ret = lf_text(dst, pn, size, node);
+		if (ret == NULL)
+			return NULL;
+	}
+	return ret;
+}
+
+/*
+ * Write a port to the log
+ * +X option write in hexadecimal notation, most signifant byte on the left
+ */
+char *lf_port(char *dst, struct sockaddr *sockaddr, size_t size, struct logformat_node *node)
+{
+	char *ret = dst;
+	int iret;
+
+	if (node->options & LOG_OPT_HEXA) {
+		const unsigned char *port = (const unsigned char *)&((struct sockaddr_in *)sockaddr)->sin_port;
+		iret = snprintf(dst, size, "%02X%02X", port[0], port[1]);
+		if (iret < 0 || iret > size)
+			return NULL;
+		ret += iret;
+	} else {
+		ret = ltoa_o(get_host_port((struct sockaddr_storage *)sockaddr), dst, size);
+		if (ret == NULL)
+			return NULL;
+	}
+	return ret;
 }
 
 /* Re-generate the syslog header at the beginning of logline once a second and
@@ -688,32 +754,30 @@ extern fd_set hdr_encode_map[];
 extern fd_set url_encode_map[];
 
 
-const char sess_cookie[8]     = "NIDVEO67";	/* No cookie, Invalid cookie, cookie for a Down server, Valid cookie, Expired cookie, Old cookie, unknown */
+const char sess_cookie[8]     = "NIDVEOU7";	/* No cookie, Invalid cookie, cookie for a Down server, Valid cookie, Expired cookie, Old cookie, Unused, unknown */
 const char sess_set_cookie[8] = "NPDIRU67";	/* No set-cookie, Set-cookie found and left unchanged (passive),
 						   Set-cookie Deleted, Set-Cookie Inserted, Set-cookie Rewritten,
 						   Set-cookie Updated, unknown, unknown */
 
+/*
+ * try to write a character if there is enough space, or goto out
+ */
 #define LOGCHAR(x) do { \
-			if (tmplog < logline + MAX_SYSLOG_LEN - 1) { \
+			if (tmplog < dst + maxsize - 1) { \
 				*(tmplog++) = (x);                     \
 			} else {                                       \
 				goto out;                              \
 			}                                              \
 		} while(0)
 
-/*
- * send a log for the session when we have enough info about it.
- * Will not log if the frontend has no log defined.
- */
-void sess_log(struct session *s)
+
+
+int build_logline(struct session *s, char *dst, size_t maxsize, struct list *list_format)
 {
-	char pn[INET6_ADDRSTRLEN];
-	char sn[INET6_ADDRSTRLEN];
 	struct proxy *fe = s->fe;
 	struct proxy *be = s->be;
-	struct proxy *prx_log;
 	struct http_txn *txn = &s->txn;
-	int tolog, level, err;
+	int tolog;
 	char *uri;
 	const char *svid;
 	struct tm tm;
@@ -721,26 +785,9 @@ void sess_log(struct session *s)
 	int hdr;
 	int last_isspace = 1;
 	char *tmplog;
+	char *ret;
+	int iret;
 	struct logformat_node *tmp;
-
-	/* if we don't want to log normal traffic, return now */
-	err = (s->flags & (SN_ERR_MASK | SN_REDISP)) ||
-		(s->req->cons->conn_retries != be->conn_retries) ||
-		((s->fe->mode == PR_MODE_HTTP) && txn->status >= 500);
-	if (!err && (fe->options2 & PR_O2_NOLOGNORM))
-		return;
-
-	if (LIST_ISEMPTY(&fe->logsrvs))
-		return;
-	prx_log = fe;
-
-	if (addr_to_str(&s->req->prod->addr.from, pn, sizeof(pn)) == AF_UNIX)
-		snprintf(pn, sizeof(pn), "unix:%d", s->listener->luid);
-
-	if (be->options2 & PR_O2_SRC_ADDR) {
-	      if (addr_to_str(&s->req->cons->addr.from, sn, sizeof(sn)) == AF_UNIX)
-		snprintf(sn, sizeof(sn), "unix:%d", s->listener->luid);
-	}
 
 	/* FIXME: let's limit ourselves to frontend logging for now. */
 	tolog = fe->to_log;
@@ -763,255 +810,355 @@ void sess_log(struct session *s)
 	if (tv_isge(&s->logs.tv_request, &s->logs.tv_accept))
 		t_request = tv_ms_elapsed(&s->logs.tv_accept, &s->logs.tv_request);
 
-	level = LOG_INFO;
-	if (err && (fe->options2 & PR_O2_LOGERRORS))
-		level = LOG_ERR;
+	tmplog = dst;
 
 	/* fill logbuffer */
+	if (LIST_ISEMPTY(list_format))
+		return 0;
 
-	tmplog = update_log_hdr(); /* update log header and skip it */
-
-	list_for_each_entry(tmp, &fe->logformat, list) {
+	list_for_each_entry(tmp, list_format, list) {
 		char *src = NULL;
 		switch (tmp->type) {
 
-			case LOG_SEPARATOR:
+			case LOG_FMT_SEPARATOR:
 				if (!last_isspace) {
 					LOGCHAR(' ');
 					last_isspace = 1;
-					*tmplog = '\0';
 				}
 				break;
 
-			case LOG_TEXT: // text
+			case LOG_FMT_TEXT: // text
 				src = tmp->arg;
-				tmplog += strlcpy2(tmplog, src, MAX_SYSLOG_LEN - (tmplog - logline));
-				if (tmplog > logline + MAX_SYSLOG_LEN - 2)
+				iret = strlcpy2(tmplog, src, dst + maxsize - tmplog);
+				if (iret == 0)
 					goto out;
+				tmplog += iret;
 				last_isspace = 0;
 				break;
 
-			case LOG_CLIENTIP:  // %Ci
-				src = (s->req->prod->addr.from.ss_family == AF_UNIX) ? "unix" : pn;
-				tmplog = logformat_write_string(tmplog, src, MAX_SYSLOG_LEN - (tmplog - logline), tmp);
-				if (!tmplog)
+			case LOG_FMT_CLIENTIP:  // %Ci
+				ret = lf_ip(tmplog, (struct sockaddr *)&s->req->prod->addr.from,
+					    dst + maxsize - tmplog, tmp);
+				if (ret == NULL)
 					goto out;
+				tmplog = ret;
 				last_isspace = 0;
 				break;
 
-			case LOG_CLIENTPORT:  // %Cp
-				tmplog = ltoa_o((s->req->prod->addr.from.ss_family == AF_UNIX) ? s->listener->luid : get_host_port(&s->req->prod->addr.from),
-				                tmplog, MAX_SYSLOG_LEN - (tmplog - logline));
-				if (!tmplog)
-					goto out;
-				last_isspace = 0;
-				break;
-
-			case LOG_SOURCEIP:  // Bi
-				src = (s->req->cons->addr.from.ss_family == AF_UNIX) ? "unix" : sn;
-				tmplog = logformat_write_string(tmplog, src, MAX_SYSLOG_LEN - (tmplog - logline), tmp);
-				if (!tmplog)
-					goto out;
-				last_isspace = 0;
-				break;
-
-			case LOG_SOURCEPORT:  // %Bp
-				tmplog = ltoa_o((s->req->cons->addr.from.ss_family == AF_UNIX) ? s->listener->luid : get_host_port(&s->req->cons->addr.from),
-				                tmplog, MAX_SYSLOG_LEN - (tmplog - logline));
-				if (!tmplog)
-					goto out;
-				last_isspace = 0;
-				break;
-
-			case LOG_DATE: // %t
-				get_localtime(s->logs.accept_date.tv_sec, &tm);
-				tmplog = date2str_log(tmplog, &tm, &(s->logs.accept_date), MAX_SYSLOG_LEN - (tmplog - logline));
-				if (!tmplog)
-					goto out;
-				last_isspace = 0;
-				break;
-
-			case LOG_DATEGMT: // %T
-				get_gmtime(s->logs.accept_date.tv_sec, &tm);
-				tmplog = gmt2str_log(tmplog, &tm, MAX_SYSLOG_LEN - (tmplog - logline));
-				if (!tmplog)
-					goto out;
-				last_isspace = 0;
-				break;
-
-			case LOG_MS: // %ms
-				if ((MAX_SYSLOG_LEN - (tmplog - logline)) < 4) {
-					tmplog = NULL;
-					goto out;
+			case LOG_FMT_CLIENTPORT:  // %Cp
+				if (s->req->prod->addr.from.ss_family == AF_UNIX) {
+					ret = ltoa_o(s->listener->luid, tmplog, dst + maxsize - tmplog);
+				} else {
+					ret = lf_port(tmplog, (struct sockaddr *)&s->req->prod->addr.from,
+						      dst + maxsize - tmplog, tmp);
 				}
+				if (ret == NULL)
+					goto out;
+				tmplog = ret;
+				last_isspace = 0;
+				break;
+
+			case LOG_FMT_FRONTENDIP: // %Fi
+				stream_sock_get_to_addr(s->req->prod);
+				ret = lf_ip(tmplog, (struct sockaddr *)&s->req->prod->addr.to,
+					    dst + maxsize - tmplog, tmp);
+				if (ret == NULL)
+					goto out;
+				tmplog = ret;
+				last_isspace = 0;
+				break;
+
+			case  LOG_FMT_FRONTENDPORT: // %Fp
+				stream_sock_get_to_addr(s->req->prod);
+				if (s->req->prod->addr.to.ss_family == AF_UNIX) {
+					ret = ltoa_o(s->listener->luid,
+						     tmplog, dst + maxsize - tmplog);
+				} else {
+					ret = lf_port(tmplog, (struct sockaddr *)&s->req->prod->addr.to,
+						      dst + maxsize - tmplog, tmp);
+				}
+				if (ret == NULL)
+					goto out;
+				tmplog = ret;
+				last_isspace = 0;
+				break;
+
+			case LOG_FMT_BACKENDIP:  // %Bi
+				ret = lf_ip(tmplog, (struct sockaddr *)&s->req->cons->addr.from,
+					    dst + maxsize - tmplog, tmp);
+				if (ret == NULL)
+					goto out;
+				tmplog = ret;
+				last_isspace = 0;
+				break;
+
+			case LOG_FMT_BACKENDPORT:  // %Bp
+				ret = lf_port(tmplog, (struct sockaddr *)&s->req->cons->addr.from,
+					      dst + maxsize - tmplog, tmp);
+				if (ret == NULL)
+					goto out;
+				tmplog = ret;
+				last_isspace = 0;
+				break;
+
+			case LOG_FMT_SERVERIP: // %Si
+				ret = lf_ip(tmplog, (struct sockaddr *)&s->req->cons->addr.to,
+					    dst + maxsize - tmplog, tmp);
+				if (ret == NULL)
+					goto out;
+				tmplog = ret;
+				last_isspace = 0;
+				break;
+
+			case LOG_FMT_SERVERPORT: // %Sp
+				ret = lf_port(tmplog, (struct sockaddr *)&s->req->cons->addr.to,
+					      dst + maxsize - tmplog, tmp);
+				if (ret == NULL)
+					goto out;
+				tmplog = ret;
+				last_isspace = 0;
+				break;
+
+			case LOG_FMT_DATE: // %t
+				get_localtime(s->logs.accept_date.tv_sec, &tm);
+				ret = date2str_log(tmplog, &tm, &(s->logs.accept_date),
+						   dst + maxsize - tmplog);
+				if (ret == NULL)
+					goto out;
+				tmplog = ret;
+				last_isspace = 0;
+				break;
+
+			case LOG_FMT_DATEGMT: // %T
+				get_gmtime(s->logs.accept_date.tv_sec, &tm);
+				ret = gmt2str_log(tmplog, &tm, dst + maxsize - tmplog);
+				if (ret == NULL)
+					goto out;
+				tmplog = ret;
+				last_isspace = 0;
+				break;
+
+			case LOG_FMT_TS: // %Ts
+				get_gmtime(s->logs.accept_date.tv_sec, &tm);
+				if (tmp->options & LOG_OPT_HEXA) {
+					iret = snprintf(tmplog, dst + maxsize - tmplog, "%04X", (unsigned int)s->logs.accept_date.tv_sec);
+					if (iret < 0 || iret > dst + maxsize - tmplog)
+						goto out;
+					last_isspace = 0;
+					tmplog += iret;
+				} else {
+					ret = ltoa_o(s->logs.accept_date.tv_sec, tmplog, dst + maxsize - tmplog);
+					if (ret == NULL)
+						goto out;
+					tmplog = ret;
+					last_isspace = 0;
+				}
+			break;
+
+			case LOG_FMT_MS: // %ms
+			if (tmp->options & LOG_OPT_HEXA) {
+					iret = snprintf(tmplog, dst + maxsize - tmplog, "%02X",(unsigned int)s->logs.accept_date.tv_usec/1000);
+					if (iret < 0 || iret > dst + maxsize - tmplog)
+						goto out;
+					last_isspace = 0;
+					tmplog += iret;
+			} else {
+				if ((dst + maxsize - tmplog) < 4)
+					goto out;
 				tmplog = utoa_pad((unsigned int)s->logs.accept_date.tv_usec/1000,
 						  tmplog, 4);
 				if (!tmplog)
 					goto out;
 				last_isspace = 0;
-				break;
+			}
+			break;
 
-			case LOG_FRONTEND: // %f
+			case LOG_FMT_FRONTEND: // %f
 				src = fe->id;
-				tmplog = logformat_write_string(tmplog, src, MAX_SYSLOG_LEN - (tmplog - logline), tmp);
-				if (!tmplog)
+				ret = lf_text(tmplog, src, dst + maxsize - tmplog, tmp);
+				if (ret == NULL)
 					goto out;
+				tmplog = ret;
 				last_isspace = 0;
 				break;
 
-			case LOG_BACKEND: // %b
+			case LOG_FMT_BACKEND: // %b
 				src = be->id;
-				tmplog = logformat_write_string(tmplog, src, MAX_SYSLOG_LEN - (tmplog - logline), tmp);
-				if (!tmplog)
+				ret = lf_text(tmplog, src, dst + maxsize - tmplog, tmp);
+				if (ret == NULL)
 					goto out;
+				tmplog = ret;
 				last_isspace = 0;
 				break;
 
-			case LOG_SERVER: // %s
+			case LOG_FMT_SERVER: // %s
 				src = (char *)svid;
-				tmplog = logformat_write_string(tmplog, src, MAX_SYSLOG_LEN - (tmplog - logline), tmp);
-				if (!tmplog)
+				ret = lf_text(tmplog, src, dst + maxsize - tmplog, tmp);
+				if (ret == NULL)
 					goto out;
+				tmplog = ret;
 				last_isspace = 0;
 				break;
 
-			case LOG_TQ: // %Tq
-				tmplog = ltoa_o(t_request, tmplog, MAX_SYSLOG_LEN - (tmplog - logline));
-				if (!tmplog)
+			case LOG_FMT_TQ: // %Tq
+				ret = ltoa_o(t_request, tmplog, dst + maxsize - tmplog);
+				if (ret == NULL)
 					goto out;
+				tmplog = ret;
 				last_isspace = 0;
 				break;
 
-			case LOG_TW: // %Tw
-				tmplog = ltoa_o((s->logs.t_queue >= 0) ? s->logs.t_queue - t_request : -1, tmplog, MAX_SYSLOG_LEN - (tmplog - logline));
-				if (!tmplog)
+			case LOG_FMT_TW: // %Tw
+				ret = ltoa_o((s->logs.t_queue >= 0) ? s->logs.t_queue - t_request : -1,
+						tmplog, dst + maxsize - tmplog);
+				if (ret == NULL)
 					goto out;
+				tmplog = ret;
 				last_isspace = 0;
 				break;
 
-			case LOG_TC: // %Tc
-				tmplog = ltoa_o((s->logs.t_connect >= 0) ? s->logs.t_connect - s->logs.t_queue : -1, tmplog, MAX_SYSLOG_LEN - (tmplog - logline));
-				if (!tmplog)
+			case LOG_FMT_TC: // %Tc
+				ret = ltoa_o((s->logs.t_connect >= 0) ? s->logs.t_connect - s->logs.t_queue : -1,
+						tmplog, dst + maxsize - tmplog);
+				if (ret == NULL)
 					goto out;
+				tmplog = ret;
 				last_isspace = 0;
 				break;
 
-			case LOG_TR: // %Tr
-				tmplog = ltoa_o((s->logs.t_data >= 0) ? s->logs.t_data - s->logs.t_connect : -1, tmplog, MAX_SYSLOG_LEN - (tmplog - logline));
-				if (!tmplog)
+			case LOG_FMT_TR: // %Tr
+				ret = ltoa_o((s->logs.t_data >= 0) ? s->logs.t_data - s->logs.t_connect : -1,
+						tmplog, dst + maxsize - tmplog);
+				if (ret == NULL)
 					goto out;
+				tmplog = ret;
 				last_isspace = 0;
 				break;
 
-			case LOG_TT:  // %Tt
+			case LOG_FMT_TT:  // %Tt
 				if (!(tolog & LW_BYTES))
-					*(tmplog++) = '+';
-				tmplog = ltoa_o(s->logs.t_close, tmplog, MAX_SYSLOG_LEN - (tmplog - logline));
-				if (!tmplog)
+					LOGCHAR('+');
+				ret = ltoa_o(s->logs.t_close, tmplog, dst + maxsize - tmplog);
+				if (ret == NULL)
 					goto out;
+				tmplog = ret;
 				last_isspace = 0;
 				break;
 
-			case LOG_STATUS: // %st
-				tmplog = ltoa_o(txn->status, tmplog, MAX_SYSLOG_LEN - (tmplog - logline));
-				if (!tmplog)
+			case LOG_FMT_STATUS: // %st
+				ret = ltoa_o(txn->status, tmplog, dst + maxsize - tmplog);
+				if (ret == NULL)
 					goto out;
+				tmplog = ret;
 				last_isspace = 0;
 				break;
 
-			case LOG_BYTES: // %B
+			case LOG_FMT_BYTES: // %B
 				if (!(tolog & LW_BYTES))
-					*(tmplog++) = '+';
-				tmplog = lltoa(s->logs.bytes_out, tmplog, MAX_SYSLOG_LEN - (tmplog - logline));
-				if (!tmplog)
+					LOGCHAR('+');
+				ret = lltoa(s->logs.bytes_out, tmplog, dst + maxsize - tmplog);
+				if (ret == NULL)
 					goto out;
+				tmplog = ret;
 				last_isspace = 0;
 				break;
 
-			case LOG_CCLIENT: // %cc
+			case LOG_FMT_CCLIENT: // %cc
 				src = txn->cli_cookie;
-				tmplog = logformat_write_string(tmplog, src, MAX_SYSLOG_LEN - (tmplog - logline), tmp);
-				if (!tmplog)
+				ret = lf_text(tmplog, src, dst + maxsize - tmplog, tmp);
+				if (ret == NULL)
 					goto out;
+				tmplog = ret;
 				last_isspace = 0;
 				break;
 
-			case LOG_CSERVER: // %cs
+			case LOG_FMT_CSERVER: // %cs
 				src = txn->srv_cookie;
-				tmplog = logformat_write_string(tmplog, src, MAX_SYSLOG_LEN - (tmplog - logline), tmp);
-				if (!tmplog)
+				ret = lf_text(tmplog, src, dst + maxsize - tmplog, tmp);
+				if (ret == NULL)
 					goto out;
+				tmplog = ret;
 				last_isspace = 0;
 				break;
 
-			case LOG_TERMSTATE: // %ts
+			case LOG_FMT_TERMSTATE: // %ts
 				LOGCHAR(sess_term_cond[(s->flags & SN_ERR_MASK) >> SN_ERR_SHIFT]);
 				LOGCHAR(sess_fin_state[(s->flags & SN_FINST_MASK) >> SN_FINST_SHIFT]);
 				*tmplog = '\0';
 				last_isspace = 0;
 				break;
 
-			case LOG_TERMSTATE_CK: // %tsc, same as TS with cookie state (for mode HTTP)
+			case LOG_FMT_TERMSTATE_CK: // %tsc, same as TS with cookie state (for mode HTTP)
 				LOGCHAR(sess_term_cond[(s->flags & SN_ERR_MASK) >> SN_ERR_SHIFT]);
 				LOGCHAR(sess_fin_state[(s->flags & SN_FINST_MASK) >> SN_FINST_SHIFT]);
 				LOGCHAR((be->options & PR_O_COOK_ANY) ? sess_cookie[(txn->flags & TX_CK_MASK) >> TX_CK_SHIFT] : '-');
 				LOGCHAR((be->options & PR_O_COOK_ANY) ? sess_set_cookie[(txn->flags & TX_SCK_MASK) >> TX_SCK_SHIFT] : '-');
-				*tmplog = '\0';
 				last_isspace = 0;
 				break;
 
-			case LOG_ACTCONN: // %ac
-				tmplog = ltoa_o(actconn, tmplog, MAX_SYSLOG_LEN - (tmplog - logline));
-				if (!tmplog)
+			case LOG_FMT_ACTCONN: // %ac
+				ret = ltoa_o(actconn, tmplog, dst + maxsize - tmplog);
+				if (ret == NULL)
 					goto out;
+				tmplog = ret;
 				last_isspace = 0;
 				break;
 
-			case LOG_FECONN:  // %fc
-				tmplog = ltoa_o(fe->feconn, tmplog, MAX_SYSLOG_LEN - (tmplog - logline));
-				if (!tmplog)
+			case LOG_FMT_FECONN:  // %fc
+				ret = ltoa_o(fe->feconn, tmplog, dst + maxsize - tmplog);
+				if (ret == NULL)
 					goto out;
+				tmplog = ret;
 				last_isspace = 0;
 				break;
 
-			case LOG_BECONN:  // %bc
-				tmplog = ltoa_o(be->beconn, tmplog, MAX_SYSLOG_LEN - (tmplog - logline));
-				if (!tmplog)
+			case LOG_FMT_BECONN:  // %bc
+				ret = ltoa_o(be->beconn, tmplog, dst + maxsize - tmplog);
+				if (ret == NULL)
 					goto out;
+				tmplog = ret;
 				last_isspace = 0;
 				break;
 
-			case LOG_SRVCONN:  // %sc
-				tmplog = ultoa_o(target_srv(&s->target) ? target_srv(&s->target)->cur_sess : 0, tmplog, MAX_SYSLOG_LEN - (tmplog - logline));
-				if (!tmplog)
+			case LOG_FMT_SRVCONN:  // %sc
+				ret = ultoa_o(target_srv(&s->target) ?
+				                 target_srv(&s->target)->cur_sess :
+				                 0, tmplog, dst + maxsize - tmplog);
+				if (ret == NULL)
 					goto out;
+				tmplog = ret;
 				last_isspace = 0;
 				break;
 
-			case LOG_RETRIES:  // %rq
+			case LOG_FMT_RETRIES:  // %rq
 				if (s->flags & SN_REDISP)
-					*(tmplog++) = '+';
-				tmplog = ltoa_o((s->req->cons->conn_retries>0)?(be->conn_retries - s->req->cons->conn_retries):be->conn_retries, tmplog, MAX_SYSLOG_LEN - (tmplog - logline));
-				if (!tmplog)
+					LOGCHAR('+');
+				ret = ltoa_o((s->req->cons->conn_retries>0) ?
+				                (be->conn_retries - s->req->cons->conn_retries) :
+				                be->conn_retries, tmplog, dst + maxsize - tmplog);
+				if (ret == NULL)
 					goto out;
+				tmplog = ret;
 				last_isspace = 0;
 				break;
 
-			case LOG_SRVQUEUE: // %sq
-				tmplog = ltoa_o(s->logs.srv_queue_size, tmplog, MAX_SYSLOG_LEN - (tmplog - logline));
-				if (!tmplog)
+			case LOG_FMT_SRVQUEUE: // %sq
+				ret = ltoa_o(s->logs.srv_queue_size, tmplog, dst + maxsize - tmplog);
+				if (ret == NULL)
 					goto out;
+				tmplog = ret;
 				last_isspace = 0;
 				break;
 
-			case LOG_BCKQUEUE:  // %bq
-				tmplog = ltoa_o(s->logs.prx_queue_size, tmplog, MAX_SYSLOG_LEN - (tmplog - logline));
-				if (!tmplog)
+			case LOG_FMT_BCKQUEUE:  // %bq
+				ret = ltoa_o(s->logs.prx_queue_size, tmplog, dst + maxsize - tmplog);
+				if (ret == NULL)
 					goto out;
+				tmplog = ret;
 				last_isspace = 0;
 				break;
 
-			case LOG_HDRREQUEST: // %hr
+			case LOG_FMT_HDRREQUEST: // %hr
 				/* request header */
 				if (fe->to_log & LW_REQHDR && txn->req.cap) {
 					if (tmp->options & LOG_OPT_QUOTE)
@@ -1021,21 +1168,23 @@ void sess_log(struct session *s)
 						if (hdr)
 							LOGCHAR('|');
 						if (txn->req.cap[hdr] != NULL) {
-							tmplog = encode_string(tmplog, logline + MAX_SYSLOG_LEN,
+							ret = encode_string(tmplog, dst + maxsize,
 									       '#', hdr_encode_map, txn->req.cap[hdr]);
-							if (*tmplog != '\0')
+							if (ret == NULL || *ret != '\0')
 								goto out;
+							tmplog = ret;
 						}
 					}
 					LOGCHAR('}');
 					if (tmp->options & LOG_OPT_QUOTE)
 						LOGCHAR('"');
 					last_isspace = 0;
+					if (tmp->options & LOG_OPT_QUOTE)
+						LOGCHAR('"');
 				}
-				*tmplog = '\0';
 				break;
 
-			case LOG_HDRREQUESTLIST: // %hrl
+			case LOG_FMT_HDRREQUESTLIST: // %hrl
 				/* request header list */
 				if (fe->to_log & LW_REQHDR && txn->req.cap) {
 					for (hdr = 0; hdr < fe->nb_req_cap; hdr++) {
@@ -1044,22 +1193,22 @@ void sess_log(struct session *s)
 						if (tmp->options & LOG_OPT_QUOTE)
 							LOGCHAR('"');
 						if (txn->req.cap[hdr] != NULL) {
-							tmplog = encode_string(tmplog, logline + MAX_SYSLOG_LEN,
+							ret = encode_string(tmplog, dst + maxsize,
 									       '#', hdr_encode_map, txn->req.cap[hdr]);
-							if (*tmplog != '\0')
+							if (ret == NULL || *ret != '\0')
 								goto out;
-
+							tmplog = ret;
 						} else if (!(tmp->options & LOG_OPT_QUOTE))
 							LOGCHAR('-');
 						if (tmp->options & LOG_OPT_QUOTE)
 							LOGCHAR('"');
-						*tmplog = '\0';
 						last_isspace = 0;
 					}
 				}
 				break;
 
-			case LOG_HDRRESPONS: // %hs
+
+			case LOG_FMT_HDRRESPONS: // %hs
 				/* response header */
 				if (fe->to_log & LW_RSPHDR &&
 				    txn->rsp.cap) {
@@ -1070,10 +1219,11 @@ void sess_log(struct session *s)
 						if (hdr)
 							LOGCHAR('|');
 						if (txn->rsp.cap[hdr] != NULL) {
-							tmplog = encode_string(tmplog, logline + MAX_SYSLOG_LEN,
-									       '#', hdr_encode_map, txn->rsp.cap[hdr]);
-							if (*tmplog != '\0')
+							ret = encode_string(tmplog, dst + maxsize,
+							                    '#', hdr_encode_map, txn->rsp.cap[hdr]);
+							if (ret == NULL || *ret != '\0')
 								goto out;
+							tmplog = ret;
 						}
 					}
 					LOGCHAR('}');
@@ -1081,10 +1231,9 @@ void sess_log(struct session *s)
 					if (tmp->options & LOG_OPT_QUOTE)
 						LOGCHAR('"');
 				}
-				*tmplog = '\0';
 				break;
 
-			case LOG_HDRRESPONSLIST: // %hsl
+			case LOG_FMT_HDRRESPONSLIST: // %hsl
 				/* response header list */
 				if (fe->to_log & LW_RSPHDR && txn->rsp.cap) {
 					for (hdr = 0; hdr < fe->nb_rsp_cap; hdr++) {
@@ -1093,50 +1242,128 @@ void sess_log(struct session *s)
 						if (tmp->options & LOG_OPT_QUOTE)
 							LOGCHAR('"');
 						if (txn->rsp.cap[hdr] != NULL) {
-							tmplog = encode_string(tmplog, logline + MAX_SYSLOG_LEN,
-									       '#', hdr_encode_map, txn->rsp.cap[hdr]);
-							if (*tmplog != '\0')
+							ret = encode_string(tmplog, dst + maxsize,
+							                    '#', hdr_encode_map, txn->rsp.cap[hdr]);
+							if (ret == NULL || *ret != '\0')
 								goto out;
+							tmplog = ret;
 						} else if (!(tmp->options & LOG_OPT_QUOTE))
 							LOGCHAR('-');
 						if (tmp->options & LOG_OPT_QUOTE)
 							LOGCHAR('"');
-						*tmplog = '\0';
 						last_isspace = 0;
 					}
 				}
 				break;
 
-			case LOG_REQ: // %r
+			case LOG_FMT_REQ: // %r
 				/* Request */
 				if (tmp->options & LOG_OPT_QUOTE)
 					LOGCHAR('"');
 				uri = txn->uri ? txn->uri : "<BADREQ>";
-				tmplog = encode_string(tmplog, logline + MAX_SYSLOG_LEN,
+				ret = encode_string(tmplog, dst + maxsize,
 						       '#', url_encode_map, uri);
-				if (*tmplog != '\0')
+				if (ret == NULL || *ret != '\0')
 					goto out;
+				tmplog = ret;
 				if (tmp->options & LOG_OPT_QUOTE)
 					LOGCHAR('"');
-				*tmplog = '\0';
 				last_isspace = 0;
 				break;
+
+			case LOG_FMT_COUNTER: // %rt
+				if (tmp->options & LOG_OPT_HEXA) {
+					iret = snprintf(tmplog, dst + maxsize - tmplog, "%04X", global.req_count);
+					if (iret < 0 || iret > dst + maxsize - tmplog)
+						goto out;
+					last_isspace = 0;
+					tmplog += iret;
+				} else {
+					ret = ltoa_o(global.req_count, tmplog, dst + maxsize - tmplog);
+					if (ret == NULL)
+						goto out;
+					tmplog = ret;
+					last_isspace = 0;
+				}
+				break;
+
+			case LOG_FMT_HOSTNAME: // %H
+				src = hostname;
+				ret = lf_text(tmplog, src, dst + maxsize - tmplog, tmp);
+				if (ret == NULL)
+					goto out;
+				tmplog = ret;
+				last_isspace = 0;
+				break;
+
+			case LOG_FMT_PID: // %pid
+				if (tmp->options & LOG_OPT_HEXA) {
+					iret = snprintf(tmplog, dst + maxsize - tmplog, "%04X", pid);
+					if (iret < 0 || iret > dst + maxsize - tmplog)
+						goto out;
+					last_isspace = 0;
+					tmplog += iret;
+				} else {
+					ret = ltoa_o(pid, tmplog, dst + maxsize - tmplog);
+					if (ret == NULL)
+						goto out;
+					tmplog = ret;
+					last_isspace = 0;
+				}
+				break;
+
+			case LOG_FMT_UNIQUEID: // %ID
+				src = s->unique_id;
+				ret = lf_text(tmplog, src, maxsize - (tmplog - dst), tmp);
+				if (ret == NULL)
+					goto out;
+				tmplog = ret;
+				last_isspace = 0;
+				break;
+
 		}
 	}
 
 out:
+	/* *tmplog is a unused character */
+	*tmplog = '\0';
 
-	if (tmplog == NULL) // if previous error
-		tmplog = logline + MAX_SYSLOG_LEN - 1;
-
-	__send_log(prx_log, level, logline, tmplog - logline + 1);
-	s->logs.logwait = 0;
+	return tmplog - dst + 1;
 
 }
 
+/*
+ * send a log for the session when we have enough info about it.
+ * Will not log if the frontend has no log defined.
+ */
+void sess_log(struct session *s)
+{
+	char *tmplog;
+	int size, err, level;
 
+	/* if we don't want to log normal traffic, return now */
+	err = (s->flags & (SN_ERR_MASK | SN_REDISP)) ||
+		(s->req->cons->conn_retries != s->be->conn_retries) ||
+			((s->fe->mode == PR_MODE_HTTP) && s->txn.status >= 500);
 
+	if (!err && (s->fe->options2 & PR_O2_NOLOGNORM))
+		return;
 
+	if (LIST_ISEMPTY(&s->fe->logsrvs))
+		return;
+
+	level = LOG_INFO;
+	if (err && (s->fe->options2 & PR_O2_LOGERRORS))
+		level = LOG_ERR;
+
+	tmplog = update_log_hdr();
+	size = tmplog - logline;
+	size += build_logline(s, tmplog, sizeof(logline) - size, &s->fe->logformat);
+	if (size > 0) {
+		__send_log(s->fe, level, logline, size);
+		s->logs.logwait = 0;
+	}
+}
 
 /*
  * Local variables:

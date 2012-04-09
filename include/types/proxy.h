@@ -205,6 +205,7 @@ struct proxy {
 	struct list persist_rules;		/* 'force-persist' and 'ignore-persist' rules (chained) */
 	struct list sticking_rules;             /* content sticking rules (chained) */
 	struct list storersp_rules;             /* content store response rules (chained) */
+	struct list server_rules;               /* server switching rules (chained) */
 	struct {                                /* TCP request processing */
 		unsigned int inspect_delay;     /* inspection delay */
 		struct list inspect_rules;      /* inspection rules */
@@ -289,6 +290,8 @@ struct proxy {
 	struct proxy *next;
 	struct list logsrvs;
 	struct list logformat; 			/* log_format linked list */
+	char *header_unique_id; 		/* unique-id header */
+	struct list format_unique_id;		/* unique-id format */
 	int to_log;				/* things to be logged (LW_*) */
 	int stop_time;                          /* date to stop listening, when stopping != 0 (int ticks) */
 	struct hdr_exp *req_exp;		/* regular expressions for request headers */
@@ -348,6 +351,15 @@ struct switching_rule {
 		struct proxy *backend;		/* target backend */
 		char *name;			/* target backend name during config parsing */
 	} be;
+};
+
+struct server_rule {
+	struct list list;			/* list linked to from the proxy */
+	struct acl_cond *cond;			/* acl condition to meet */
+	union {
+		struct server *ptr;		/* target server */
+		char *name;			/* target server name during config parsing */
+	} srv;
 };
 
 struct persist_rule {

@@ -366,7 +366,7 @@ struct server *findserver(const struct proxy *px, const char *name) {
 			continue;
 		}
 
-		Alert("Refusing to use duplicated server '%s' fould in proxy: %s!\n",
+		Alert("Refusing to use duplicated server '%s' found in proxy: %s!\n",
 			name, px->id);
 
 		return NULL;
@@ -427,6 +427,7 @@ void init_new_proxy(struct proxy *p)
 	LIST_INIT(&p->redirect_rules);
 	LIST_INIT(&p->mon_fail_cond);
 	LIST_INIT(&p->switching_rules);
+	LIST_INIT(&p->server_rules);
 	LIST_INIT(&p->persist_rules);
 	LIST_INIT(&p->sticking_rules);
 	LIST_INIT(&p->storersp_rules);
@@ -438,6 +439,7 @@ void init_new_proxy(struct proxy *p)
 	LIST_INIT(&p->listener_queue);
 	LIST_INIT(&p->logsrvs);
 	LIST_INIT(&p->logformat);
+	LIST_INIT(&p->format_unique_id);
 
 	/* Timeouts are defined as -1 */
 	proxy_reset_timeouts(p);
