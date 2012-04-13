@@ -437,8 +437,8 @@ static int api_call(struct stream_interface *si, struct chunk *msg)
 		}
 
 		if (sv->state & SRV_MAINTAIN) {
-			if (sv->tracked) {
-				if (sv->tracked->state & SRV_RUNNING) {
+			if (sv->track) {
+				if (sv->track->state & SRV_RUNNING) {
 					set_server_up(sv);
 					sv->health = sv->rise;
 				} else {

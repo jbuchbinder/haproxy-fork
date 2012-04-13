@@ -60,13 +60,6 @@
 #define STAT_CLI_O_TAB  8   /* dump tables */
 #define STAT_CLI_O_CLR  9   /* clear tables */
 
-/* status codes (strictly 4 chars) used in the URL to display a message */
-#define STAT_STATUS_UNKN "UNKN"	/* an unknown error occured, shouldn't happen */
-#define STAT_STATUS_DONE "DONE"	/* the action is successful */
-#define STAT_STATUS_NONE "NONE"	/* nothing happened (no action chosen or servers state didn't change) */
-#define STAT_STATUS_EXCD "EXCD"	/* an error occured becayse the buffer couldn't store all data */
-#define STAT_STATUS_DENY "DENY"	/* action denied */
-
 #ifdef USE_API
 #define STAT_API_CMD_NOOP "noop"	/* no operation */
 #define STAT_API_CMD_VERSION "version"	/* request version */
