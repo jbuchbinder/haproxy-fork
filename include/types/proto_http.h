@@ -64,15 +64,7 @@
 #define TX_CACHE_COOK	0x00002000	/* a cookie in the response is cacheable */
 #define TX_CACHE_SHIFT	12		/* bit shift */
 
-/* request and response HTTP version */
-#define TX_REQ_VER_11	0x00004000	/* the request is HTTP/1.1 or above */
-#define TX_RES_VER_11	0x00008000	/* the response is HTTP/1.1 or above */
-
-/* report presence of transfer-encoding:chunked and content-length headers */
-#define TX_REQ_CNT_LEN	0x00010000	/* content-length present in the request */
-#define TX_REQ_TE_CHNK	0x00020000	/* transfer-encoding: chunked present in the request */
-#define TX_RES_CNT_LEN	0x00040000	/* content-length present in the response */
-#define TX_RES_TE_CHNK	0x00080000	/* transfer-encoding: chunked present in the response */
+/* Unused: 0x4000, 0x8000, 0x10000, 0x20000, 0x80000 */
 
 /* indicate how we *want* the connection to behave, regardless of what is in
  * the headers. We have 4 possible values right now :
@@ -90,12 +82,8 @@
 #define TX_CON_CLO_SET  0x00400000	/* "connection: close" is now set */
 #define TX_CON_KAL_SET  0x00800000	/* "connection: keep-alive" is now set */
 
-/* if either of these flags is not set, we may be forced to complete an
- * connection as a half-way tunnel. For instance, if no content-length
- * appears in a 1.1 response, but the request is correctly sized.
- */
-#define TX_REQ_XFER_LEN	0x01000000	/* request xfer size can be determined */
-#define TX_RES_XFER_LEN	0x02000000	/* response xfer size can be determined */
+/* Unused: 0x1000000, 0x2000000 */
+
 #define TX_WAIT_NEXT_RQ	0x04000000	/* waiting for the second request to start, use keep-alive timeout */
 
 #define TX_HDR_CONN_PRS	0x08000000	/* "connection" header already parsed (req or res), results below */
@@ -186,6 +174,23 @@
 #define HTTP_MSG_CLOSING      34 // shutdown_w done, not all bytes sent yet
 #define HTTP_MSG_CLOSED       35 // shutdown_w done, all bytes sent
 #define HTTP_MSG_TUNNEL       36 // tunneled data after DONE
+
+
+/*
+ * HTTP message status flags (msg->flags)
+ */
+
+#define HTTP_MSGF_CNT_LEN     0x00000001  /* content-length was found in the message */
+#define HTTP_MSGF_TE_CHNK     0x00000002  /* transfer-encoding: chunked was found */
+
+/* if this flags is not set in either direction, we may be forced to complete a
+ * connection as a half-way tunnel (eg if no content-length appears in a 1.1
+ * response, but the request is correctly sized)
+ */
+#define HTTP_MSGF_XFER_LEN    0x00000004  /* message xfer size can be determined */
+#define HTTP_MSGF_VER_11      0x00000008  /* the message is HTTP/1.1 or above */
+
+
 
 /* Redirect flags */
 enum {
@@ -281,28 +286,34 @@ enum {
  *  - som (Start of Message) : relative offset in the buffer of first byte of
  *                             the request being processed or parsed. Reset to
  *                             zero during accept(), and changes while parsing
- *                             chunks.
+ *                             chunks (considered as messages). Relative to
+ *                             buffer origin (->p), may cause wrapping.
  *  - eoh (End of Headers)   : relative offset in the buffer of first byte that
  *                             is not part of a completely processed header.
  *                             During parsing, it points to last header seen
  *                             for states after START. When in HTTP_MSG_BODY,
  *                             eoh points to the first byte of the last CRLF
- *                             preceeding data.
- *  - col and sov            : When in HTTP_MSG_BODY, will point to the first
- *                             byte of data (relative to buffer).
+ *                             preceeding data. Relative to buffer's origin.
+ *  - sov                    : When in HTTP_MSG_BODY, will point to the first
+ *                             byte of data (relative to buffer's origin).
  *  - sol (start of line)    : start of line, also start of message when fully parsed.
  *  - eol (End of Line)      : relative offset in the buffer of the first byte
  *                             which marks the end of the line (LF or CRLF).
- * Note that all offsets are relative to the beginning of the buffer. To get
- * them relative to the current request, subtract ->som or ->sol.
+ * Note that all offsets are relative to the origin of the buffer (buf->p)
+ * which always points to the beginning of the message (request or response).
+ * Since a message may not wrap, pointer computations may be one without any
+ * care for wrapping (no addition overflow nor subtract underflow).
  */
 struct http_msg {
 	unsigned int msg_state;                /* where we are in the current message parsing */
-	unsigned int col, sov;                 /* current header: colon, start of value */
+	unsigned int flags;                    /* flags describing the message (HTTP version, ...) */
+	struct buffer *buf;                    /* pointer to the buffer which holds the message */
+	unsigned int next;                     /* pointer to next byte to parse, relative to buf->p */
+	unsigned int sov;                      /* current header: start of value */
 	unsigned int eoh;                      /* End Of Headers, relative to buffer */
-	char *sol;                             /* start of line, also start of message when fully parsed */
-	char *eol;                             /* end of line */
-	unsigned int som;                      /* Start Of Message, relative to buffer */
+	unsigned int sol;                      /* start of line, also start of message when fully parsed */
+	unsigned int eol;                      /* end of line */
+	unsigned int som;                      /* Start Of Message, relative to buffer's origin */
 	int err_pos;                           /* err handling: -2=block, -1=pass, 0+=detected */
 	union {                                /* useful start line pointers, relative to ->sol */
 		struct {

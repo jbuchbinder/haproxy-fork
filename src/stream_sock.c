@@ -85,7 +85,7 @@ static int stream_sock_splice_in(struct buffer *b, struct stream_interface *si)
 	if (!(b->flags & BF_KERN_SPLICING))
 		return -1;
 
-	if (b->l) {
+	if (buffer_not_empty(b)) {
 		/* We're embarrassed, there are already data pending in
 		 * the buffer and we don't want to have them at two
 		 * locations at a time. Let's indicate we need some
@@ -94,7 +94,7 @@ static int stream_sock_splice_in(struct buffer *b, struct stream_interface *si)
 		si->flags |= SI_FL_WAIT_ROOM;
 		EV_FD_CLR(fd, DIR_RD);
 		b->rex = TICK_ETERNITY;
-		b->cons->chk_snd(b->cons);
+		b->cons->sock.chk_snd(b->cons);
 		return 1;
 	}
 
@@ -269,9 +269,9 @@ int stream_sock_read(int fd) {
 #endif
 	cur_read = 0;
 	while (1) {
-		max = buffer_max_len(b) - b->l;
+		max = bi_avail(b);
 
-		if (max <= 0) {
+		if (!max) {
 			b->flags |= BF_FULL;
 			si->flags |= SI_FL_WAIT_ROOM;
 			break;
@@ -280,28 +280,28 @@ int stream_sock_read(int fd) {
 		/*
 		 * 1. compute the maximum block size we can read at once.
 		 */
-		if (b->l == 0) {
+		if (buffer_empty(b)) {
 			/* let's realign the buffer to optimize I/O */
-			b->r = b->w = b->lr = b->data;
+			b->p = b->data;
 		}
-		else if (b->r > b->w) {
+		else if (b->data + b->o < b->p &&
+			 b->p + b->i < b->data + b->size) {
 			/* remaining space wraps at the end, with a moving limit */
-			if (max > b->data + b->size - b->r)
-				max = b->data + b->size - b->r;
+			if (max > b->data + b->size - (b->p + b->i))
+				max = b->data + b->size - (b->p + b->i);
 		}
 		/* else max is already OK */
 
 		/*
 		 * 2. read the largest possible block
 		 */
-		ret = recv(fd, b->r, max, 0);
+		ret = recv(fd, bi_end(b), max, 0);
 
 		if (ret > 0) {
-			b->r += ret;
-			b->l += ret;
+			b->i += ret;
 			cur_read += ret;
 
-			/* if we're allowed to directly forward data, we must update send_max */
+			/* if we're allowed to directly forward data, we must update ->o */
 			if (b->to_forward && !(b->flags & (BF_SHUTW|BF_SHUTW_NOW))) {
 				unsigned long fwd = ret;
 				if (b->to_forward != BUF_INFINITE_FORWARD) {
@@ -309,26 +309,20 @@ int stream_sock_read(int fd) {
 						fwd = b->to_forward;
 					b->to_forward -= fwd;
 				}
-				b->send_max += fwd;
-				b->flags &= ~BF_OUT_EMPTY;
+				b_adv(b, fwd);
 			}
 
 			if (fdtab[fd].state == FD_STCONN)
 				fdtab[fd].state = FD_STREADY;
 
 			b->flags |= BF_READ_PARTIAL;
-
-			if (b->r == b->data + b->size) {
-				b->r = b->data; /* wrap around the buffer */
-			}
-
 			b->total += ret;
 
-			if (b->l >= buffer_max_len(b)) {
+			if (bi_full(b)) {
 				/* The buffer is now full, there's no point in going through
 				 * the loop again.
 				 */
-				if (!(b->flags & BF_STREAMER_FAST) && (cur_read == b->l)) {
+				if (!(b->flags & BF_STREAMER_FAST) && (cur_read == buffer_len(b))) {
 					b->xfer_small = 0;
 					b->xfer_large++;
 					if (b->xfer_large >= 3) {
@@ -446,10 +440,10 @@ int stream_sock_read(int fd) {
 	 * HTTP chunking).
 	 */
 	if (b->pipe || /* always try to send spliced data */
-	    (b->send_max == b->l && (b->cons->flags & SI_FL_WAIT_DATA))) {
+	    (b->i == 0 && (b->cons->flags & SI_FL_WAIT_DATA))) {
 		int last_len = b->pipe ? b->pipe->data : 0;
 
-		b->cons->chk_snd(b->cons);
+		b->cons->sock.chk_snd(b->cons);
 
 		/* check if the consumer has freed some space */
 		if (!(b->flags & BF_FULL) &&
@@ -588,7 +582,7 @@ static int stream_sock_write_loop(struct stream_interface *si, struct buffer *b)
 	 * in the normal buffer.
 	 */
 #endif
-	if (!b->send_max) {
+	if (!b->o) {
 		b->flags |= BF_OUT_EMPTY;
 		return retval;
 	}
@@ -597,14 +591,11 @@ static int stream_sock_write_loop(struct stream_interface *si, struct buffer *b)
 	 * data left, and that there are sendable buffered data.
 	 */
 	while (1) {
-		if (b->r > b->w)
-			max = b->r - b->w;
-		else
-			max = b->data + b->size - b->w;
+		max = b->o;
 
-		/* limit the amount of outgoing data if required */
-		if (max > b->send_max)
-			max = b->send_max;
+		/* outgoing data may wrap at the end */
+		if (b->data + max > b->p)
+			max = b->data + max - b->p;
 
 		/* check if we want to inform the kernel that we're interested in
 		 * sending more data after this call. We want this if :
@@ -623,8 +614,8 @@ static int stream_sock_write_loop(struct stream_interface *si, struct buffer *b)
 			if ((!(b->flags & BF_NEVER_WAIT) &&
 			    ((b->to_forward && b->to_forward != BUF_INFINITE_FORWARD) ||
 			     (b->flags & BF_EXPECT_MORE))) ||
-			    ((b->flags & (BF_SHUTW|BF_SHUTW_NOW|BF_HIJACK)) == BF_SHUTW_NOW && (max == b->send_max)) ||
-			    (max != b->l && max != b->send_max)) {
+			    ((b->flags & (BF_SHUTW|BF_SHUTW_NOW|BF_HIJACK)) == BF_SHUTW_NOW && (max == b->o)) ||
+			    (max != b->o)) {
 				send_flag |= MSG_MORE;
 			}
 
@@ -632,7 +623,7 @@ static int stream_sock_write_loop(struct stream_interface *si, struct buffer *b)
 			if (b->flags & BF_SEND_DONTWAIT)
 				send_flag &= ~MSG_MORE;
 
-			ret = send(si->fd, b->w, max, send_flag);
+			ret = send(si->fd, bo_ptr(b), max, send_flag);
 		} else {
 			int skerr;
 			socklen_t lskerr = sizeof(skerr);
@@ -641,7 +632,7 @@ static int stream_sock_write_loop(struct stream_interface *si, struct buffer *b)
 			if (ret == -1 || skerr)
 				ret = -1;
 			else
-				ret = send(si->fd, b->w, max, MSG_DONTWAIT);
+				ret = send(si->fd, bo_ptr(b), max, MSG_DONTWAIT);
 		}
 
 		if (ret > 0) {
@@ -650,20 +641,15 @@ static int stream_sock_write_loop(struct stream_interface *si, struct buffer *b)
 
 			b->flags |= BF_WRITE_PARTIAL;
 
-			b->w += ret;
-			if (b->w == b->data + b->size)
-				b->w = b->data; /* wrap around the buffer */
+			b->o -= ret;
+			if (likely(!buffer_len(b)))
+				/* optimize data alignment in the buffer */
+				b->p = b->data;
 
-			b->l -= ret;
-			if (likely(b->l < buffer_max_len(b)))
+			if (likely(!bi_full(b)))
 				b->flags &= ~BF_FULL;
 
-			if (likely(!b->l))
-				/* optimize data alignment in the buffer */
-				b->r = b->w = b->lr = b->data;
-
-			b->send_max -= ret;
-			if (!b->send_max) {
+			if (!b->o) {
 				/* Always clear both flags once everything has been sent, they're one-shot */
 				b->flags &= ~(BF_EXPECT_MORE | BF_SEND_DONTWAIT);
 				if (likely(!b->pipe))
@@ -757,7 +743,7 @@ int stream_sock_write(int fd)
 
 		/* Funny, we were called to write something but there wasn't
 		 * anything. We can get there, for example if we were woken up
-		 * on a write event to finish the splice, but the send_max is 0
+		 * on a write event to finish the splice, but the ->o is 0
 		 * so we cannot write anything from the buffer. Let's disable
 		 * the write event and pretend we never came there.
 		 */
@@ -766,7 +752,7 @@ int stream_sock_write(int fd)
 	if (b->flags & BF_OUT_EMPTY) {
 		/* the connection is established but we can't write. Either the
 		 * buffer is empty, or we just refrain from sending because the
-		 * send_max limit was reached. Maybe we just wrote the last
+		 * ->o limit was reached. Maybe we just wrote the last
 		 * chunk and need to close.
 		 */
 		if (((b->flags & (BF_SHUTW|BF_HIJACK|BF_SHUTW_NOW)) == BF_SHUTW_NOW) &&
@@ -804,7 +790,7 @@ int stream_sock_write(int fd)
 		/* the producer might be waiting for more room to store data */
 		if (likely((b->flags & (BF_SHUTW|BF_WRITE_PARTIAL|BF_FULL|BF_DONT_READ)) == BF_WRITE_PARTIAL &&
 			   (b->prod->flags & SI_FL_WAIT_ROOM)))
-			b->prod->chk_rcv(b->prod);
+			b->prod->sock.chk_rcv(b->prod);
 
 		/* we have to wake up if there is a special event or if we don't have
 		 * any more data to forward and it's not planned to send any more.
@@ -939,13 +925,13 @@ void stream_sock_data_finish(struct stream_interface *si)
 	struct buffer *ob = si->ob;
 	int fd = si->fd;
 
-	DPRINTF(stderr,"[%u] %s: fd=%d owner=%p ib=%p, ob=%p, exp(r,w)=%u,%u ibf=%08x obf=%08x ibl=%d obl=%d si=%d\n",
+	DPRINTF(stderr,"[%u] %s: fd=%d owner=%p ib=%p, ob=%p, exp(r,w)=%u,%u ibf=%08x obf=%08x ibh=%d ibt=%d obh=%d obd=%d si=%d\n",
 		now_ms, __FUNCTION__,
 		fd, fdtab[fd].owner,
 		ib, ob,
 		ib->rex, ob->wex,
 		ib->flags, ob->flags,
-		ib->l, ob->l, si->state);
+		ib->i, ib->o, ob->i, ob->o, si->state);
 
 	/* Check if we need to close the read side */
 	if (!(ib->flags & BF_SHUTR)) {
@@ -1017,13 +1003,13 @@ void stream_sock_chk_rcv(struct stream_interface *si)
 {
 	struct buffer *ib = si->ib;
 
-	DPRINTF(stderr,"[%u] %s: fd=%d owner=%p ib=%p, ob=%p, exp(r,w)=%u,%u ibf=%08x obf=%08x ibl=%d obl=%d si=%d\n",
+	DPRINTF(stderr,"[%u] %s: fd=%d owner=%p ib=%p, ob=%p, exp(r,w)=%u,%u ibf=%08x obf=%08x ibh=%d ibt=%d obh=%d obd=%d si=%d\n",
 		now_ms, __FUNCTION__,
 		si->fd, fdtab[si->fd].owner,
 		ib, si->ob,
 		ib->rex, si->ob->wex,
 		ib->flags, si->ob->flags,
-		ib->l, si->ob->l, si->state);
+		ib->i, ib->o, si->ob->i, si->ob->o, si->state);
 
 	if (unlikely(si->state != SI_ST_EST || (ib->flags & BF_SHUTR)))
 		return;
@@ -1052,13 +1038,13 @@ void stream_sock_chk_snd(struct stream_interface *si)
 	struct buffer *ob = si->ob;
 	int retval;
 
-	DPRINTF(stderr,"[%u] %s: fd=%d owner=%p ib=%p, ob=%p, exp(r,w)=%u,%u ibf=%08x obf=%08x ibl=%d obl=%d si=%d\n",
+	DPRINTF(stderr,"[%u] %s: fd=%d owner=%p ib=%p, ob=%p, exp(r,w)=%u,%u ibf=%08x obf=%08x ibh=%d ibt=%d obh=%d obd=%d si=%d\n",
 		now_ms, __FUNCTION__,
 		si->fd, fdtab[si->fd].owner,
 		si->ib, ob,
 		si->ib->rex, ob->wex,
 		si->ib->flags, ob->flags,
-		si->ib->l, ob->l, si->state);
+		si->ib->i, si->ib->o, ob->i, ob->o, si->state);
 
 	if (unlikely(si->state != SI_ST_EST || (ob->flags & BF_SHUTW)))
 		return;
@@ -1097,7 +1083,7 @@ void stream_sock_chk_snd(struct stream_interface *si)
 	if (ob->flags & BF_OUT_EMPTY) {
 		/* the connection is established but we can't write. Either the
 		 * buffer is empty, or we just refrain from sending because the
-		 * send_max limit was reached. Maybe we just wrote the last
+		 * ->o limit was reached. Maybe we just wrote the last
 		 * chunk and need to close.
 		 */
 		if (((ob->flags & (BF_SHUTW|BF_HIJACK|BF_AUTO_CLOSE|BF_SHUTW_NOW)) ==
@@ -1152,175 +1138,16 @@ void stream_sock_chk_snd(struct stream_interface *si)
 	}
 }
 
-/* This function is called on a read event from a listening socket, corresponding
- * to an accept. It tries to accept as many connections as possible, and for each
- * calls the listener's accept handler (generally the frontend's accept handler).
- */
-int stream_sock_accept(int fd)
-{
-	struct listener *l = fdtab[fd].owner;
-	struct proxy *p = l->frontend;
-	int max_accept = global.tune.maxaccept;
-	int cfd;
-	int ret;
-
-	if (unlikely(l->nbconn >= l->maxconn)) {
-		listener_full(l);
-		return 0;
-	}
-
-	if (global.cps_lim && !(l->options & LI_O_UNLIMITED)) {
-		int max = freq_ctr_remain(&global.conn_per_sec, global.cps_lim, 0);
-
-		if (unlikely(!max)) {
-			/* frontend accept rate limit was reached */
-			limit_listener(l, &global_listener_queue);
-			task_schedule(global_listener_queue_task, tick_add(now_ms, next_event_delay(&global.conn_per_sec, global.cps_lim, 0)));
-			return 0;
-		}
-
-		if (max_accept > max)
-			max_accept = max;
-	}
-
-	if (p && p->fe_sps_lim) {
-		int max = freq_ctr_remain(&p->fe_sess_per_sec, p->fe_sps_lim, 0);
-
-		if (unlikely(!max)) {
-			/* frontend accept rate limit was reached */
-			limit_listener(l, &p->listener_queue);
-			task_schedule(p->task, tick_add(now_ms, next_event_delay(&p->fe_sess_per_sec, p->fe_sps_lim, 0)));
-			return 0;
-		}
-
-		if (max_accept > max)
-			max_accept = max;
-	}
-
-	/* Note: if we fail to allocate a connection because of configured
-	 * limits, we'll schedule a new attempt worst 1 second later in the
-	 * worst case. If we fail due to system limits or temporary resource
-	 * shortage, we try again 100ms later in the worst case.
-	 */
-	while (max_accept--) {
-		struct sockaddr_storage addr;
-		socklen_t laddr = sizeof(addr);
-
-		if (unlikely(actconn >= global.maxconn) && !(l->options & LI_O_UNLIMITED)) {
-			limit_listener(l, &global_listener_queue);
-			task_schedule(global_listener_queue_task, tick_add(now_ms, 1000)); /* try again in 1 second */
-			return 0;
-		}
-
-		if (unlikely(p && p->feconn >= p->maxconn)) {
-			limit_listener(l, &p->listener_queue);
-			return 0;
-		}
-
-		cfd = accept(fd, (struct sockaddr *)&addr, &laddr);
-		if (unlikely(cfd == -1)) {
-			switch (errno) {
-			case EAGAIN:
-			case EINTR:
-			case ECONNABORTED:
-				return 0;	    /* nothing more to accept */
-			case ENFILE:
-				if (p)
-					send_log(p, LOG_EMERG,
-						 "Proxy %s reached system FD limit at %d. Please check system tunables.\n",
-						 p->id, maxfd);
-				limit_listener(l, &global_listener_queue);
-				task_schedule(global_listener_queue_task, tick_add(now_ms, 100)); /* try again in 100 ms */
-				return 0;
-			case EMFILE:
-				if (p)
-					send_log(p, LOG_EMERG,
-						 "Proxy %s reached process FD limit at %d. Please check 'ulimit-n' and restart.\n",
-						 p->id, maxfd);
-				limit_listener(l, &global_listener_queue);
-				task_schedule(global_listener_queue_task, tick_add(now_ms, 100)); /* try again in 100 ms */
-				return 0;
-			case ENOBUFS:
-			case ENOMEM:
-				if (p)
-					send_log(p, LOG_EMERG,
-						 "Proxy %s reached system memory limit at %d sockets. Please check system tunables.\n",
-						 p->id, maxfd);
-				limit_listener(l, &global_listener_queue);
-				task_schedule(global_listener_queue_task, tick_add(now_ms, 100)); /* try again in 100 ms */
-				return 0;
-			default:
-				return 0;
-			}
-		}
-
-		if (unlikely(cfd >= global.maxsock)) {
-			send_log(p, LOG_EMERG,
-				 "Proxy %s reached the configured maximum connection limit. Please check the global 'maxconn' value.\n",
-				 p->id);
-			close(cfd);
-			limit_listener(l, &global_listener_queue);
-			task_schedule(global_listener_queue_task, tick_add(now_ms, 1000)); /* try again in 1 second */
-			return 0;
-		}
-
-		/* increase the per-process number of cumulated connections */
-		if (!(l->options & LI_O_UNLIMITED)) {
-			update_freq_ctr(&global.conn_per_sec, 1);
-			if (global.conn_per_sec.curr_ctr > global.cps_max)
-				global.cps_max = global.conn_per_sec.curr_ctr;
-			actconn++;
-		}
-
-		jobs++;
-		totalconn++;
-		l->nbconn++;
-
-		if (l->counters) {
-			if (l->nbconn > l->counters->conn_max)
-				l->counters->conn_max = l->nbconn;
-		}
-
-		ret = l->accept(l, cfd, &addr);
-		if (unlikely(ret <= 0)) {
-			/* The connection was closed by session_accept(). Either
-			 * we just have to ignore it (ret == 0) or it's a critical
-			 * error due to a resource shortage, and we must stop the
-			 * listener (ret < 0).
-			 */
-			if (!(l->options & LI_O_UNLIMITED))
-				actconn--;
-			jobs--;
-			l->nbconn--;
-			if (ret == 0) /* successful termination */
-				continue;
-
-			limit_listener(l, &global_listener_queue);
-			task_schedule(global_listener_queue_task, tick_add(now_ms, 100)); /* try again in 100 ms */
-			return 0;
-		}
-
-		if (l->nbconn >= l->maxconn) {
-			listener_full(l);
-			return 0;
-		}
-
-	} /* end of while (p->feconn < p->maxconn) */
-
-	return 0;
-}
-
-
-/* Prepare a stream interface to be used in socket mode. */
-void stream_sock_prepare_interface(struct stream_interface *si)
-{
-	si->update = stream_sock_data_finish;
-	si->shutr = stream_sock_shutr;
-	si->shutw = stream_sock_shutw;
-	si->chk_rcv = stream_sock_chk_rcv;
-	si->chk_snd = stream_sock_chk_snd;
-}
-
+/* stream sock operations */
+struct sock_ops stream_sock = {
+	.update  = stream_sock_data_finish,
+	.shutr   = stream_sock_shutr,
+	.shutw   = stream_sock_shutw,
+	.chk_rcv = stream_sock_chk_rcv,
+	.chk_snd = stream_sock_chk_snd,
+	.read    = stream_sock_read,
+	.write   = stream_sock_write,
+};
 
 /*
  * Local variables:

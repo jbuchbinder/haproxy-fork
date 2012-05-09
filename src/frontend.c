@@ -31,6 +31,7 @@
 #include <types/global.h>
 
 #include <proto/acl.h>
+#include <proto/arg.h>
 #include <proto/buffers.h>
 #include <proto/fd.h>
 #include <proto/frontend.h>
@@ -181,7 +182,7 @@ int frontend_accept(struct session *s)
 			break;
 		}
 
-		write(1, trash, len);
+		if (write(1, trash, len) < 0) /* shut gcc warning */;
 	}
 
 	if (s->fe->mode == PR_MODE_HTTP)
@@ -253,22 +254,22 @@ int frontend_accept(struct session *s)
 int frontend_decode_proxy_request(struct session *s, struct buffer *req, int an_bit)
 {
 	char *line = req->data;
-	char *end = req->data + req->l;
+	char *end = req->data + req->i;
 	int len;
 
-	DPRINTF(stderr,"[%u] %s: session=%p b=%p, exp(r,w)=%u,%u bf=%08x bl=%d analysers=%02x\n",
+	DPRINTF(stderr,"[%u] %s: session=%p b=%p, exp(r,w)=%u,%u bf=%08x bh=%d analysers=%02x\n",
 		now_ms, __FUNCTION__,
 		s,
 		req,
 		req->rex, req->wex,
 		req->flags,
-		req->l,
+		req->i,
 		req->analysers);
 
 	if (req->flags & (BF_READ_ERROR|BF_READ_TIMEOUT))
 		goto fail;
 
-	len = MIN(req->l, 6);
+	len = MIN(req->i, 6);
 	if (!len)
 		goto missing;
 
@@ -277,7 +278,7 @@ int frontend_decode_proxy_request(struct session *s, struct buffer *req, int an_
 		goto fail;
 
 	line += 6;
-	if (req->l < 18) /* shortest possible line */
+	if (req->i < 18) /* shortest possible line */
 		goto missing;
 
 	if (!memcmp(line, "TCP4 ", 5) != 0) {
@@ -498,58 +499,51 @@ int make_proxy_line(char *buf, int buf_len, struct sockaddr_storage *src, struct
 
 /* set temp integer to the id of the frontend */
 static int
-acl_fetch_fe_id(struct proxy *px, struct session *l4, void *l7, int dir,
-                struct acl_expr *expr, struct acl_test *test) {
-
-	test->flags = ACL_TEST_F_READ_ONLY;
-	temp_pattern.data.integer = l4->fe->uuid;
-	return 1;
-}
-
-/* set temp integer to the number of connections per second reaching the frontend */
-static int
-acl_fetch_fe_sess_rate(struct proxy *px, struct session *l4, void *l7, int dir,
-                       struct acl_expr *expr, struct acl_test *test)
+acl_fetch_fe_id(struct proxy *px, struct session *l4, void *l7, unsigned int opt,
+                const struct arg *args, struct sample *smp)
 {
-	test->flags = ACL_TEST_F_VOL_TEST;
-	if (expr->arg_len) {
-		/* another proxy was designated, we must look for it */
-		for (px = proxy; px; px = px->next)
-			if ((px->cap & PR_CAP_FE) && !strcmp(px->id, expr->arg.str))
-				break;
-	}
-	if (!px)
-		return 0;
-
-	temp_pattern.data.integer = read_freq_ctr(&px->fe_sess_per_sec);
+	smp->flags = SMP_F_VOL_SESS;
+	smp->type = SMP_T_UINT;
+	smp->data.uint = l4->fe->uuid;
 	return 1;
 }
 
-/* set temp integer to the number of concurrent connections on the frontend */
+/* set temp integer to the number of connections per second reaching the frontend.
+ * Accepts exactly 1 argument. Argument is a frontend, other types will cause
+ * an undefined behaviour.
+ */
 static int
-acl_fetch_fe_conn(struct proxy *px, struct session *l4, void *l7, int dir,
-		  struct acl_expr *expr, struct acl_test *test)
+acl_fetch_fe_sess_rate(struct proxy *px, struct session *l4, void *l7, unsigned int opt,
+                       const struct arg *args, struct sample *smp)
 {
-	test->flags = ACL_TEST_F_VOL_TEST;
-	if (expr->arg_len) {
-		/* another proxy was designated, we must look for it */
-		for (px = proxy; px; px = px->next)
-			if ((px->cap & PR_CAP_FE) && !strcmp(px->id, expr->arg.str))
-				break;
-	}
-	if (!px)
-		return 0;
+	smp->flags = SMP_F_VOL_TEST;
+	smp->type = SMP_T_UINT;
+	smp->data.uint = read_freq_ctr(&args->data.prx->fe_sess_per_sec);
+	return 1;
+}
 
-	temp_pattern.data.integer = px->feconn;
+/* set temp integer to the number of concurrent connections on the frontend
+ * Accepts exactly 1 argument. Argument is a frontend, other types will cause
+ * an undefined behaviour.
+ */
+static int
+acl_fetch_fe_conn(struct proxy *px, struct session *l4, void *l7, unsigned int opt,
+                  const struct arg *args, struct sample *smp)
+{
+	smp->flags = SMP_F_VOL_TEST;
+	smp->type = SMP_T_UINT;
+	smp->data.uint = args->data.prx->feconn;
 	return 1;
 }
 
 
-/* Note: must not be declared <const> as its list will be overwritten */
+/* Note: must not be declared <const> as its list will be overwritten.
+ * Please take care of keeping this list alphabetically sorted.
+ */
 static struct acl_kw_list acl_kws = {{ },{
-	{ "fe_id",        acl_parse_int, acl_fetch_fe_id,        acl_match_int, ACL_USE_NOTHING },
-	{ "fe_sess_rate", acl_parse_int, acl_fetch_fe_sess_rate, acl_match_int, ACL_USE_NOTHING },
-	{ "fe_conn",      acl_parse_int, acl_fetch_fe_conn,      acl_match_int, ACL_USE_NOTHING },
+	{ "fe_conn",      acl_parse_int, acl_fetch_fe_conn,      acl_match_int, ACL_USE_NOTHING, ARG1(1,FE) },
+	{ "fe_id",        acl_parse_int, acl_fetch_fe_id,        acl_match_int, ACL_USE_NOTHING, 0 },
+	{ "fe_sess_rate", acl_parse_int, acl_fetch_fe_sess_rate, acl_match_int, ACL_USE_NOTHING, ARG1(1,FE) },
 	{ NULL, NULL, NULL, NULL },
 }};
 

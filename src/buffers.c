@@ -35,36 +35,33 @@ int init_buffer()
  * in the limit of the number of bytes to forward. This must be the only method
  * to use to schedule bytes to be sent. If the requested number is too large, it
  * is automatically adjusted. The number of bytes taken into account is returned.
- * Directly touching ->to_forward will cause lockups when send_max goes down to
+ * Directly touching ->to_forward will cause lockups when ->o goes down to
  * zero if nobody is ready to push the remaining data.
  */
 unsigned long long buffer_forward(struct buffer *buf, unsigned long long bytes)
 {
-	unsigned int data_left;
 	unsigned int new_forward;
+	unsigned int forwarded;
+	unsigned int bytes32;
 
-	if (!bytes)
-		return 0;
-	data_left = buf->l - buf->send_max;
-	if (bytes <= (unsigned long long)data_left) {
-		buf->send_max += bytes;
-		buf->flags &= ~BF_OUT_EMPTY;
-		return bytes;
+	bytes32 = bytes;
+
+	/* hint: avoid comparisons on long long for the fast case, since if the
+	 * length does not fit in an unsigned it, it will never be forwarded at
+	 * once anyway.
+	 */
+	if (bytes <= ~0U) {
+		if (bytes32 <= buf->i) {
+			/* OK this amount of bytes might be forwarded at once */
+			if (!bytes32)
+				return 0;
+			b_adv(buf, bytes32);
+			return bytes;
+		}
 	}
 
-	buf->send_max += data_left;
-	if (buf->send_max)
-		buf->flags &= ~BF_OUT_EMPTY;
-
-	if (buf->l < buffer_max_len(buf))
-		buf->flags &= ~BF_FULL;
-	else
-		buf->flags |= BF_FULL;
-
-	if (likely(bytes == BUF_INFINITE_FORWARD)) {
-		buf->to_forward = bytes;
-		return bytes;
-	}
+	forwarded = buf->i;
+	b_adv(buf, buf->i);
 
 	/* Note: the case below is the only case where we may return
 	 * a byte count that does not fit into a 32-bit number.
@@ -72,8 +69,13 @@ unsigned long long buffer_forward(struct buffer *buf, unsigned long long bytes)
 	if (likely(buf->to_forward == BUF_INFINITE_FORWARD))
 		return bytes;
 
-	new_forward = buf->to_forward + bytes - data_left;
-	bytes = data_left; /* at least those bytes were scheduled */
+	if (likely(bytes == BUF_INFINITE_FORWARD)) {
+		buf->to_forward = bytes;
+		return bytes;
+	}
+
+	new_forward = buf->to_forward + bytes - forwarded;
+	bytes = forwarded; /* at least those bytes were scheduled */
 
 	if (new_forward <= buf->to_forward) {
 		/* integer overflow detected, let's assume no more than 2G at once */
@@ -91,8 +93,10 @@ unsigned long long buffer_forward(struct buffer *buf, unsigned long long bytes)
  * success, -2 if the message is larger than the buffer size, or the number of
  * bytes available otherwise. The send limit is automatically adjusted with the
  * amount of data written. FIXME-20060521: handle unaligned data.
+ * Note: this function appends data to the buffer's output and possibly overwrites
+ * any pending input data which are assumed not to exist.
  */
-int buffer_write(struct buffer *buf, const char *msg, int len)
+int bo_inject(struct buffer *buf, const char *msg, int len)
 {
 	int max;
 
@@ -113,29 +117,26 @@ int buffer_write(struct buffer *buf, const char *msg, int len)
 	if (len > max)
 		return max;
 
-	memcpy(buf->r, msg, len);
-	buf->l += len;
-	buf->send_max += len;
-	buf->r += len;
+	memcpy(buf->p, msg, len);
+	buf->o += len;
+	buf->p = b_ptr(buf, len);
 	buf->total += len;
-	if (buf->r == buf->data + buf->size)
-		buf->r = buf->data;
 
 	buf->flags &= ~(BF_OUT_EMPTY|BF_FULL);
-	if (buf->l >= buffer_max_len(buf))
+	if (bi_full(buf))
 		buf->flags |= BF_FULL;
 
 	return -1;
 }
 
 /* Tries to copy character <c> into buffer <buf> after length controls. The
- * send_max and to_forward pointers are updated. If the buffer's input is
+ * ->o and to_forward pointers are updated. If the buffer's input is
  * closed, -2 is returned. If there is not enough room left in the buffer, -1
  * is returned. Otherwise the number of bytes copied is returned (1). Buffer
  * flags FULL, EMPTY and READ_PARTIAL are updated if some data can be
  * transferred.
  */
-int buffer_put_char(struct buffer *buf, char c)
+int bi_putchr(struct buffer *buf, char c)
 {
 	if (unlikely(buffer_input_closed(buf)))
 		return -2;
@@ -143,21 +144,18 @@ int buffer_put_char(struct buffer *buf, char c)
 	if (buf->flags & BF_FULL)
 		return -1;
 
-	*buf->r = c;
+	*bi_end(buf) = c;
 
-	buf->l++;
-	if (buf->l >= buffer_max_len(buf))
+	buf->i++;
+	if (bi_full(buf))
 		buf->flags |= BF_FULL;
 	buf->flags |= BF_READ_PARTIAL;
-
-	buf->r++;
-	if (buf->r - buf->data == buf->size)
-		buf->r -= buf->size;
 
 	if (buf->to_forward >= 1) {
 		if (buf->to_forward != BUF_INFINITE_FORWARD)
 			buf->to_forward--;
-		buf->send_max++;
+		buf->o++;
+		buf->i--;
 		buf->flags &= ~BF_OUT_EMPTY;
 	}
 
@@ -166,14 +164,14 @@ int buffer_put_char(struct buffer *buf, char c)
 }
 
 /* Tries to copy block <blk> at once into buffer <buf> after length controls.
- * The send_max and to_forward pointers are updated. If the buffer's input is
+ * The ->o and to_forward pointers are updated. If the buffer's input is
  * closed, -2 is returned. If the block is too large for this buffer, -3 is
  * returned. If there is not enough room left in the buffer, -1 is returned.
  * Otherwise the number of bytes copied is returned (0 being a valid number).
  * Buffer flags FULL, EMPTY and READ_PARTIAL are updated if some data can be
  * transferred.
  */
-int buffer_put_block(struct buffer *buf, const char *blk, int len)
+int bi_putblk(struct buffer *buf, const char *blk, int len)
 {
 	int max;
 
@@ -181,7 +179,7 @@ int buffer_put_block(struct buffer *buf, const char *blk, int len)
 		return -2;
 
 	max = buffer_max_len(buf);
-	if (unlikely(len > max - buf->l)) {
+	if (unlikely(len > max - buffer_len(buf))) {
 		/* we can't write this chunk right now because the buffer is
 		 * almost full or because the block is too large. Return the
 		 * available space or -2 if impossible.
@@ -197,12 +195,11 @@ int buffer_put_block(struct buffer *buf, const char *blk, int len)
 
 	/* OK so the data fits in the buffer in one or two blocks */
 	max = buffer_contig_space_with_res(buf, buf->size - max);
-	memcpy(buf->r, blk, MIN(len, max));
+	memcpy(bi_end(buf), blk, MIN(len, max));
 	if (len > max)
 		memcpy(buf->data, blk + max, len - max);
 
-	buf->l += len;
-	buf->r += len;
+	buf->i += len;
 	buf->total += len;
 	if (buf->to_forward) {
 		unsigned long fwd = len;
@@ -211,15 +208,11 @@ int buffer_put_block(struct buffer *buf, const char *blk, int len)
 				fwd = buf->to_forward;
 			buf->to_forward -= fwd;
 		}
-		buf->send_max += fwd;
-		buf->flags &= ~BF_OUT_EMPTY;
+		b_adv(buf, fwd);
 	}
 
-	if (buf->r >= buf->data + buf->size)
-		buf->r -= buf->size;
-
 	buf->flags &= ~BF_FULL;
-	if (buf->l >= buffer_max_len(buf))
+	if (bi_full(buf))
 		buf->flags |= BF_FULL;
 
 	/* notify that some data was read from the SI into the buffer */
@@ -232,12 +225,12 @@ int buffer_put_block(struct buffer *buf, const char *blk, int len)
  *   >0 : number of bytes read. Includes the \n if present before len or end.
  *   =0 : no '\n' before end found. <str> is left undefined.
  *   <0 : no more bytes readable because output is shut.
- * The buffer status is not changed. The caller must call buffer_skip() to
+ * The buffer status is not changed. The caller must call bo_skip() to
  * update it. The '\n' is waited for as long as neither the buffer nor the
  * output are full. If either of them is full, the string may be returned
  * as is, without the '\n'.
  */
-int buffer_get_line(struct buffer *buf, char *str, int len)
+int bo_getline(struct buffer *buf, char *str, int len)
 {
 	int ret, max;
 	char *p;
@@ -252,10 +245,10 @@ int buffer_get_line(struct buffer *buf, char *str, int len)
 		goto out;
 	}
 
-	p = buf->w;
+	p = bo_ptr(buf);
 
-	if (max > buf->send_max) {
-		max = buf->send_max;
+	if (max > buf->o) {
+		max = buf->o;
 		str[max-1] = 0;
 	}
 	while (max) {
@@ -265,11 +258,9 @@ int buffer_get_line(struct buffer *buf, char *str, int len)
 
 		if (*p == '\n')
 			break;
-		p++;
-		if (p == buf->data + buf->size)
-			p = buf->data;
+		p = buffer_wrap_add(buf, p + 1);
 	}
-	if (ret > 0 && ret < len && ret < buf->send_max &&
+	if (ret > 0 && ret < len && ret < buf->o &&
 	    *(str-1) != '\n' &&
 	    !(buf->flags & (BF_SHUTW|BF_SHUTW_NOW)))
 		ret = 0;
@@ -284,30 +275,30 @@ int buffer_get_line(struct buffer *buf, char *str, int len)
  *   >0 : number of bytes read, equal to requested size.
  *   =0 : not enough data available. <blk> is left undefined.
  *   <0 : no more bytes readable because output is shut.
- * The buffer status is not changed. The caller must call buffer_skip() to
+ * The buffer status is not changed. The caller must call bo_skip() to
  * update it.
  */
-int buffer_get_block(struct buffer *buf, char *blk, int len, int offset)
+int bo_getblk(struct buffer *buf, char *blk, int len, int offset)
 {
 	int firstblock;
 
 	if (buf->flags & BF_SHUTW)
 		return -1;
 
-	if (len + offset > buf->send_max) {
+	if (len + offset > buf->o) {
 		if (buf->flags & (BF_SHUTW|BF_SHUTW_NOW))
 			return -1;
 		return 0;
 	}
 
-	firstblock = buf->data + buf->size - buf->w;
+	firstblock = buf->data + buf->size - bo_ptr(buf);
 	if (firstblock > offset) {
 		if (firstblock >= len + offset) {
-			memcpy(blk, buf->w + offset, len);
+			memcpy(blk, bo_ptr(buf) + offset, len);
 			return len;
 		}
 
-		memcpy(blk, buf->w + offset, firstblock - offset);
+		memcpy(blk, bo_ptr(buf) + offset, firstblock - offset);
 		memcpy(blk + firstblock - offset, buf->data, len - firstblock + offset);
 		return len;
 	}
@@ -318,12 +309,13 @@ int buffer_get_block(struct buffer *buf, char *blk, int len, int offset)
 
 /* This function writes the string <str> at position <pos> which must be in
  * buffer <b>, and moves <end> just after the end of <str>. <b>'s parameters
- * (l, r, lr) are updated to be valid after the shift. the shift value
+ * <l> and <r> are updated to be valid after the shift. The shift value
  * (positive or negative) is returned. If there's no space left, the move is
- * not done. The function does not adjust ->send_max nor BF_OUT_EMPTY because
- * it does not make sense to use it on data scheduled to be sent. The string
- * length is taken from parameter <len>. If <len> is null, the <str> pointer
- * is allowed to be null.
+ * not done. The function does not adjust ->o nor BF_OUT_EMPTY because it
+ * does not make sense to use it on data scheduled to be sent. For the same
+ * reason, it does not make sense to call this function on unparsed data, so
+ * <orig> is not updated. The string length is taken from parameter <len>. If
+ * <len> is null, the <str> pointer is allowed to be null.
  */
 int buffer_replace2(struct buffer *b, char *pos, char *end, const char *str, int len)
 {
@@ -331,28 +323,27 @@ int buffer_replace2(struct buffer *b, char *pos, char *end, const char *str, int
 
 	delta = len - (end - pos);
 
-	if (delta + b->r >= b->data + b->size)
+	if (bi_end(b) + delta >= b->data + b->size)
 		return 0;  /* no space left */
 
-	if (delta + b->r > b->w && b->w >= b->r && b->l)
+	if (buffer_not_empty(b) &&
+	    bi_end(b) + delta > bo_ptr(b) &&
+	    bo_ptr(b) >= bi_end(b))
 		return 0;  /* no space left before wrapping data */
 
 	/* first, protect the end of the buffer */
-	memmove(end + delta, end, b->r - end);
+	memmove(end + delta, end, bi_end(b) - end);
 
 	/* now, copy str over pos */
 	if (len)
 		memcpy(pos, str, len);
 
-	/* we only move data after the displaced zone */
-	if (b->r  > pos) b->r  += delta;
-	if (b->lr > pos) b->lr += delta;
-	b->l += delta;
+	b->i += delta;
 
 	b->flags &= ~BF_FULL;
-	if (b->l == 0)
-		b->r = b->w = b->lr = b->data;
-	if (b->l >= buffer_max_len(b))
+	if (buffer_len(b) == 0)
+		b->p = b->data;
+	if (bi_full(b))
 		b->flags |= BF_FULL;
 
 	return delta;
@@ -363,7 +354,8 @@ int buffer_replace2(struct buffer *b, char *pos, char *end, const char *str, int
  * argument informs about the length of string <str> so that we don't have to
  * measure it. It does not include the "\r\n". If <str> is NULL, then the buffer
  * is only opened for len+2 bytes but nothing is copied in. It may be useful in
- * some circumstances. The send limit is *not* adjusted.
+ * some circumstances. The send limit is *not* adjusted. Same comments as above
+ * for the valid use cases.
  *
  * The number of bytes added is returned on success. 0 is returned on failure.
  */
@@ -373,11 +365,11 @@ int buffer_insert_line2(struct buffer *b, char *pos, const char *str, int len)
 
 	delta = len + 2;
 
-	if (delta + b->r >= b->data + b->size)
+	if (bi_end(b) + delta >= b->data + b->size)
 		return 0;  /* no space left */
 
 	/* first, protect the end of the buffer */
-	memmove(pos + delta, pos, b->r - pos);
+	memmove(pos + delta, pos, bi_end(b) - pos);
 
 	/* now, copy str over pos */
 	if (len && str) {
@@ -386,18 +378,43 @@ int buffer_insert_line2(struct buffer *b, char *pos, const char *str, int len)
 		pos[len + 1] = '\n';
 	}
 
-	/* we only move data after the displaced zone */
-	if (b->r  > pos) b->r  += delta;
-	if (b->lr > pos) b->lr += delta;
-	b->l += delta;
+	b->i += delta;
 
 	b->flags &= ~BF_FULL;
-	if (b->l >= buffer_max_len(b))
+	if (bi_full(b))
 		b->flags |= BF_FULL;
 
 	return delta;
 }
 
+
+/* This function realigns input data in a possibly wrapping buffer so that it
+ * becomes contiguous and starts at the beginning of the buffer area. The
+ * function may only be used when the buffer's output is empty.
+ */
+void buffer_slow_realign(struct buffer *buf)
+{
+	/* two possible cases :
+	 *   - the buffer is in one contiguous block, we move it in-place
+	 *   - the buffer is in two blocks, we move it via the swap_buffer
+	 */
+	if (buf->i) {
+		int block1 = buf->i;
+		int block2 = 0;
+		if (buf->p + buf->i > buf->data + buf->size) {
+			/* non-contiguous block */
+			block1 = buf->data + buf->size - buf->p;
+			block2 = buf->p + buf->i - (buf->data + buf->size);
+		}
+		if (block2)
+			memcpy(swap_buffer, buf->data, block2);
+		memmove(buf->data, buf->p, block1);
+		if (block2)
+			memcpy(buf->data + block1, swap_buffer, block2);
+	}
+
+	buf->p = buf->data;
+}
 
 /* Realigns a possibly non-contiguous buffer by bouncing bytes from source to
  * destination. It does not use any intermediate buffer and does the move in
@@ -410,12 +427,12 @@ void buffer_bounce_realign(struct buffer *buf)
 	int advance, to_move;
 	char *from, *to;
 
-	advance = buf->data + buf->size - buf->w;
+	from = bo_ptr(buf);
+	advance = buf->data + buf->size - from;
 	if (!advance)
 		return;
 
-	from = buf->w;
-	to_move = buf->l;
+	to_move = buffer_len(buf);
 	while (to_move) {
 		char last, save;
 
@@ -440,11 +457,11 @@ void buffer_bounce_realign(struct buffer *buf)
 			 * empty area is either between buf->r and from or before from or
 			 * after buf->r.
 			 */
-			if (from > buf->r) {
-				if (to >= buf->r && to < from)
+			if (from > bi_end(buf)) {
+				if (to >= bi_end(buf) && to < from)
 					break;
-			} else if (from < buf->r) {
-				if (to < from || to >= buf->r)
+			} else if (from < bi_end(buf)) {
+				if (to < from || to >= bi_end(buf))
 					break;
 			}
 
@@ -572,11 +589,11 @@ int chunk_asciiencode(struct chunk *dst, struct chunk *src, char qc) {
 void buffer_dump(FILE *o, struct buffer *b, int from, int to)
 {
 	fprintf(o, "Dumping buffer %p\n", b);
-	fprintf(o, "  data=%p l=%d r=%p w=%p lr=%p\n",
-		b->data, b->l, b->r, b->w, b->lr);
+	fprintf(o, "  data=%p o=%d i=%d p=%p\n",
+		b->data, b->o, b->i, b->p);
 
-	if (!to || to > b->l)
-		to = b->l;
+	if (!to || to > buffer_len(b))
+		to = buffer_len(b);
 
 	fprintf(o, "Dumping contents from byte %d to byte %d\n", from, to);
 	for (; from < to; from++) {

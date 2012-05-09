@@ -12,6 +12,7 @@
 
 #include <ctype.h>
 #include <netdb.h>
+#include <stdarg.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
@@ -777,6 +778,47 @@ int str2net(const char *str, struct in_addr *addr, struct in_addr *mask)
  out_err:
 	ret_val = 0;
 	goto out_free;
+}
+
+
+/*
+ * converts <str> to two struct in6_addr* which must be pre-allocated.
+ * The format is "addr[/mask]", where "addr" cannot be empty, and mask
+ * is an optionnal number of bits (128 being the default).
+ * Returns 1 if OK, 0 if error.
+ */
+int str62net(const char *str, struct in6_addr *addr, unsigned char *mask)
+{
+	char *c, *s;
+	int ret_val = 0;
+	char *err;
+	unsigned long len = 128;
+
+	s = strdup(str);
+	if (!s)
+		return 0;
+
+	memset(mask, 0, sizeof(*mask));
+	memset(addr, 0, sizeof(*addr));
+
+	if ((c = strrchr(s, '/')) != NULL) {
+		*c++ = '\0'; /* c points to the mask */
+		if (!*c)
+			goto out_free;
+
+		len = strtoul(c, &err, 10);
+		if ((err && *err) || (unsigned)len > 128)
+			goto out_free;
+	}
+	*mask = len; /* OK we have a valid mask in <len> */
+
+	if (!inet_pton(AF_INET6, s, addr))
+		goto out_free;
+
+	ret_val = 1;
+ out_free:
+	free(s);
+	return ret_val;
 }
 
 
@@ -1728,6 +1770,68 @@ char *gmt2str_log(char *dst, struct tm *tm, size_t size)
 	return dst;
 }
 
+/* Dynamically allocates a string of the proper length to hold the formatted
+ * output. NULL is returned on error. The caller is responsible for freeing the
+ * memory area using free(). The resulting string is returned in <out> if the
+ * pointer is not NULL. A previous version of <out> might be used to build the
+ * new string, and it will be freed before returning if it is not NULL, which
+ * makes it possible to build complex strings from iterative calls without
+ * having to care about freeing intermediate values, as in the example below :
+ *
+ *     memprintf(&err, "invalid argument: '%s'", arg);
+ *     ...
+ *     memprintf(&err, "parser said : <%s>\n", *err);
+ *     ...
+ *     free(*err);
+ *
+ * This means that <err> must be initialized to NULL before first invocation.
+ * The return value also holds the allocated string, which eases error checking
+ * and immediate consumption. If the output pointer is not used, NULL must be
+ * passed instead and it will be ignored.
+ *
+ * It is also convenient to use it without any free except the last one :
+ *    err = NULL;
+ *    if (!fct1(err)) report(*err);
+ *    if (!fct2(err)) report(*err);
+ *    if (!fct3(err)) report(*err);
+ *    free(*err);
+ */
+char *memprintf(char **out, const char *format, ...)
+{
+	va_list args;
+	char *ret = NULL;
+	int allocated = 0;
+	int needed = 0;
+
+	do {
+		/* vsnprintf() will return the required length even when the
+		 * target buffer is NULL. We do this in a loop just in case
+		 * intermediate evaluations get wrong.
+		 */
+		va_start(args, format);
+		needed = vsnprintf(ret, allocated, format, args) + 1;
+		va_end(args);
+
+		if (needed <= allocated)
+			break;
+
+		allocated = needed;
+		ret = realloc(ret, allocated);
+	} while (ret);
+
+	if (needed < 0) {
+		/* an error was encountered */
+		free(ret);
+		ret = NULL;
+	}
+
+	if (out) {
+		free(*out);
+		*out = ret;
+	}
+
+	return ret;
+}
 
 /*
  * Local variables:

@@ -10,6 +10,7 @@
  *
  */
 
+#include <errno.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -17,9 +18,15 @@
 #include <common/errors.h>
 #include <common/mini-clist.h>
 #include <common/standard.h>
+#include <common/time.h>
+
+#include <types/global.h>
 
 #include <proto/acl.h>
 #include <proto/fd.h>
+#include <proto/freq_ctr.h>
+#include <proto/log.h>
+#include <proto/task.h>
 
 /* List head of all registered protocols */
 static struct list protocols = LIST_HEAD_INIT(protocols);
@@ -230,6 +237,164 @@ void delete_listener(struct listener *listener)
 	listener->proto->nb_listeners--;
 }
 
+/* This function is called on a read event from a listening socket, corresponding
+ * to an accept. It tries to accept as many connections as possible, and for each
+ * calls the listener's accept handler (generally the frontend's accept handler).
+ */
+int listener_accept(int fd)
+{
+	struct listener *l = fdtab[fd].owner;
+	struct proxy *p = l->frontend;
+	int max_accept = global.tune.maxaccept;
+	int cfd;
+	int ret;
+
+	if (unlikely(l->nbconn >= l->maxconn)) {
+		listener_full(l);
+		return 0;
+	}
+
+	if (global.cps_lim && !(l->options & LI_O_UNLIMITED)) {
+		int max = freq_ctr_remain(&global.conn_per_sec, global.cps_lim, 0);
+
+		if (unlikely(!max)) {
+			/* frontend accept rate limit was reached */
+			limit_listener(l, &global_listener_queue);
+			task_schedule(global_listener_queue_task, tick_add(now_ms, next_event_delay(&global.conn_per_sec, global.cps_lim, 0)));
+			return 0;
+		}
+
+		if (max_accept > max)
+			max_accept = max;
+	}
+
+	if (p && p->fe_sps_lim) {
+		int max = freq_ctr_remain(&p->fe_sess_per_sec, p->fe_sps_lim, 0);
+
+		if (unlikely(!max)) {
+			/* frontend accept rate limit was reached */
+			limit_listener(l, &p->listener_queue);
+			task_schedule(p->task, tick_add(now_ms, next_event_delay(&p->fe_sess_per_sec, p->fe_sps_lim, 0)));
+			return 0;
+		}
+
+		if (max_accept > max)
+			max_accept = max;
+	}
+
+	/* Note: if we fail to allocate a connection because of configured
+	 * limits, we'll schedule a new attempt worst 1 second later in the
+	 * worst case. If we fail due to system limits or temporary resource
+	 * shortage, we try again 100ms later in the worst case.
+	 */
+	while (max_accept--) {
+		struct sockaddr_storage addr;
+		socklen_t laddr = sizeof(addr);
+
+		if (unlikely(actconn >= global.maxconn) && !(l->options & LI_O_UNLIMITED)) {
+			limit_listener(l, &global_listener_queue);
+			task_schedule(global_listener_queue_task, tick_add(now_ms, 1000)); /* try again in 1 second */
+			return 0;
+		}
+
+		if (unlikely(p && p->feconn >= p->maxconn)) {
+			limit_listener(l, &p->listener_queue);
+			return 0;
+		}
+
+		cfd = accept(fd, (struct sockaddr *)&addr, &laddr);
+		if (unlikely(cfd == -1)) {
+			switch (errno) {
+			case EAGAIN:
+			case EINTR:
+			case ECONNABORTED:
+				return 0;	    /* nothing more to accept */
+			case ENFILE:
+				if (p)
+					send_log(p, LOG_EMERG,
+						 "Proxy %s reached system FD limit at %d. Please check system tunables.\n",
+						 p->id, maxfd);
+				limit_listener(l, &global_listener_queue);
+				task_schedule(global_listener_queue_task, tick_add(now_ms, 100)); /* try again in 100 ms */
+				return 0;
+			case EMFILE:
+				if (p)
+					send_log(p, LOG_EMERG,
+						 "Proxy %s reached process FD limit at %d. Please check 'ulimit-n' and restart.\n",
+						 p->id, maxfd);
+				limit_listener(l, &global_listener_queue);
+				task_schedule(global_listener_queue_task, tick_add(now_ms, 100)); /* try again in 100 ms */
+				return 0;
+			case ENOBUFS:
+			case ENOMEM:
+				if (p)
+					send_log(p, LOG_EMERG,
+						 "Proxy %s reached system memory limit at %d sockets. Please check system tunables.\n",
+						 p->id, maxfd);
+				limit_listener(l, &global_listener_queue);
+				task_schedule(global_listener_queue_task, tick_add(now_ms, 100)); /* try again in 100 ms */
+				return 0;
+			default:
+				return 0;
+			}
+		}
+
+		if (unlikely(cfd >= global.maxsock)) {
+			send_log(p, LOG_EMERG,
+				 "Proxy %s reached the configured maximum connection limit. Please check the global 'maxconn' value.\n",
+				 p->id);
+			close(cfd);
+			limit_listener(l, &global_listener_queue);
+			task_schedule(global_listener_queue_task, tick_add(now_ms, 1000)); /* try again in 1 second */
+			return 0;
+		}
+
+		/* increase the per-process number of cumulated connections */
+		if (!(l->options & LI_O_UNLIMITED)) {
+			update_freq_ctr(&global.conn_per_sec, 1);
+			if (global.conn_per_sec.curr_ctr > global.cps_max)
+				global.cps_max = global.conn_per_sec.curr_ctr;
+			actconn++;
+		}
+
+		jobs++;
+		totalconn++;
+		l->nbconn++;
+
+		if (l->counters) {
+			if (l->nbconn > l->counters->conn_max)
+				l->counters->conn_max = l->nbconn;
+		}
+
+		ret = l->accept(l, cfd, &addr);
+		if (unlikely(ret <= 0)) {
+			/* The connection was closed by session_accept(). Either
+			 * we just have to ignore it (ret == 0) or it's a critical
+			 * error due to a resource shortage, and we must stop the
+			 * listener (ret < 0).
+			 */
+			if (!(l->options & LI_O_UNLIMITED))
+				actconn--;
+			jobs--;
+			l->nbconn--;
+			if (ret == 0) /* successful termination */
+				continue;
+
+			limit_listener(l, &global_listener_queue);
+			task_schedule(global_listener_queue_task, tick_add(now_ms, 100)); /* try again in 100 ms */
+			return 0;
+		}
+
+		if (l->nbconn >= l->maxconn) {
+			listener_full(l);
+			return 0;
+		}
+
+	} /* end of while (p->feconn < p->maxconn) */
+
+	return 0;
+}
+
 /* Registers the protocol <proto> */
 void protocol_register(struct protocol *proto)
 {
@@ -319,33 +484,48 @@ int protocol_disable_all(void)
 	return err;
 }
 
+/* Returns the protocol handler for socket family <family> or NULL if not found */
+struct protocol *protocol_by_family(int family)
+{
+	struct protocol *proto;
+
+	list_for_each_entry(proto, &protocols, list) {
+		if (proto->sock_domain == family)
+			return proto;
+	}
+	return NULL;
+}
+
 /************************************************************************/
 /*           All supported ACL keywords must be declared here.          */
 /************************************************************************/
 
 /* set temp integer to the number of connexions to the same listening socket */
 static int
-acl_fetch_dconn(struct proxy *px, struct session *l4, void *l7, int dir,
-                struct acl_expr *expr, struct acl_test *test)
+acl_fetch_dconn(struct proxy *px, struct session *l4, void *l7, unsigned int opt,
+                const struct arg *args, struct sample *smp)
 {
-	temp_pattern.data.integer = l4->listener->nbconn;
+	smp->type = SMP_T_UINT;
+	smp->data.uint = l4->listener->nbconn;
 	return 1;
 }
 
 /* set temp integer to the id of the socket (listener) */
 static int
-acl_fetch_so_id(struct proxy *px, struct session *l4, void *l7, int dir,
-                struct acl_expr *expr, struct acl_test *test) {
-
-	test->flags = ACL_TEST_F_READ_ONLY;
-	temp_pattern.data.integer = l4->listener->luid;
+acl_fetch_so_id(struct proxy *px, struct session *l4, void *l7, unsigned int opt,
+                const struct arg *args, struct sample *smp)
+{
+	smp->type = SMP_T_UINT;
+	smp->data.uint = l4->listener->luid;
 	return 1;
 }
 
-/* Note: must not be declared <const> as its list will be overwritten */
+/* Note: must not be declared <const> as its list will be overwritten.
+ * Please take care of keeping this list alphabetically sorted.
+ */
 static struct acl_kw_list acl_kws = {{ },{
-	{ "dst_conn",   acl_parse_int,   acl_fetch_dconn,    acl_match_int, ACL_USE_NOTHING },
-	{ "so_id",      acl_parse_int,   acl_fetch_so_id,    acl_match_int, ACL_USE_NOTHING },
+	{ "dst_conn",   acl_parse_int,   acl_fetch_dconn,    acl_match_int, ACL_USE_NOTHING, 0 },
+	{ "so_id",      acl_parse_int,   acl_fetch_so_id,    acl_match_int, ACL_USE_NOTHING, 0 },
 	{ NULL, NULL, NULL, NULL },
 }};
 

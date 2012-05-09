@@ -1,8 +1,9 @@
 /*
- * include/proto/pattern.h
- * Functions for patterns management.
+ * include/proto/sample.h
+ * Functions for samples management.
  *
  * Copyright (C) 2009-2010 EXCELIANCE, Emeric Brun <ebrun@exceliance.fr>
+ * Copyright (C) 2012 Willy Tarreau <w@1wt.eu>
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -19,21 +20,17 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
  */
 
-#ifndef _PROTO_PATTERN_H
-#define _PROTO_PATTERN_H
+#ifndef _PROTO_SAMPLE_H
+#define _PROTO_SAMPLE_H
 
-#include <types/pattern.h>
+#include <types/sample.h>
 #include <types/stick_table.h>
 
-extern struct pattern temp_pattern;
+struct sample_expr *sample_parse_expr(char **str, int *idx, char *err, int err_size);
+struct sample *sample_process(struct proxy *px, struct session *l4,
+                               void *l7, unsigned int dir, struct sample_expr *expr,
+                               struct sample *p);
+void sample_register_fetches(struct sample_fetch_kw_list *psl);
+void sample_register_convs(struct sample_conv_kw_list *psl);
 
-struct pattern_expr *pattern_parse_expr(char **str, int *idx, char *err, int err_size);
-struct pattern *pattern_process(struct proxy *px, struct session *l4,
-                                void *l7, int dir, struct pattern_expr *expr,
-                                struct pattern *p);
-void pattern_register_fetches(struct pattern_fetch_kw_list *psl);
-void pattern_register_convs(struct pattern_conv_kw_list *psl);
-
-int pattern_arg_ipmask(const char *arg_str, struct pattern_arg **arg_p, int *arg_i);
-int pattern_arg_str(const char *arg_str, struct pattern_arg **arg_p, int *arg_i);
-#endif
+#endif /* _PROTO_SAMPLE_H */

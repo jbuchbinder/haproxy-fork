@@ -32,6 +32,28 @@
 #include <proto/stream_sock.h>
 #include <proto/task.h>
 
+/* socket operations for embedded tasks */
+struct sock_ops stream_int_embedded = {
+	.update  = stream_int_update_embedded,
+	.shutr   = stream_int_shutr,
+	.shutw   = stream_int_shutw,
+	.chk_rcv = stream_int_chk_rcv,
+	.chk_snd = stream_int_chk_snd,
+	.read    = NULL,
+	.write   = NULL,
+};
+
+/* socket operations for external tasks */
+struct sock_ops stream_int_task = {
+	.update  = stream_int_update,
+	.shutr   = stream_int_shutr,
+	.shutw   = stream_int_shutw,
+	.chk_rcv = stream_int_chk_rcv,
+	.chk_snd = stream_int_chk_snd,
+	.read    = NULL,
+	.write   = NULL,
+};
+
 /*
  * This function only has to be called once after a wakeup event in case of
  * suspected timeout. It controls the stream interface timeouts and sets
@@ -74,9 +96,9 @@ void stream_int_retnclose(struct stream_interface *si, const struct chunk *msg)
 	buffer_auto_close(si->ib);
 	buffer_erase(si->ib);
 
-	buffer_cut_tail(si->ob);
+	bi_erase(si->ob);
 	if (likely(msg && msg->len))
-		buffer_write(si->ob, msg->str, msg->len);
+		bo_inject(si->ob, msg->str, msg->len);
 
 	si->ob->wex = tick_add_ifset(now_ms, si->ob->wto);
 	buffer_auto_read(si->ob);
@@ -108,7 +130,7 @@ void stream_int_update_embedded(struct stream_interface *si)
 		return;
 
 	if ((si->ob->flags & (BF_OUT_EMPTY|BF_SHUTW|BF_HIJACK|BF_SHUTW_NOW)) == (BF_OUT_EMPTY|BF_SHUTW_NOW))
-		si->shutw(si);
+		si->sock.shutw(si);
 
 	if ((si->ob->flags & (BF_FULL|BF_SHUTW|BF_SHUTW_NOW|BF_HIJACK)) == 0)
 		si->flags |= SI_FL_WAIT_DATA;
@@ -134,11 +156,11 @@ void stream_int_update_embedded(struct stream_interface *si)
 	old_flags = si->flags;
 	if (likely((si->ob->flags & (BF_SHUTW|BF_WRITE_PARTIAL|BF_FULL|BF_DONT_READ)) == BF_WRITE_PARTIAL &&
 		   (si->ob->prod->flags & SI_FL_WAIT_ROOM)))
-		si->ob->prod->chk_rcv(si->ob->prod);
+		si->ob->prod->sock.chk_rcv(si->ob->prod);
 
 	if (((si->ib->flags & (BF_READ_PARTIAL|BF_OUT_EMPTY)) == BF_READ_PARTIAL) &&
 	    (si->ib->cons->flags & SI_FL_WAIT_DATA)) {
-		si->ib->cons->chk_snd(si->ib->cons);
+		si->ib->cons->sock.chk_snd(si->ib->cons);
 		/* check if the consumer has freed some space */
 		if (!(si->ib->flags & BF_FULL))
 			si->flags &= ~SI_FL_WAIT_ROOM;
@@ -308,12 +330,8 @@ struct task *stream_int_register_handler(struct stream_interface *si, struct si_
 {
 	DPRINTF(stderr, "registering handler %p for si %p (was %p)\n", app, si, si->owner);
 
-	si->update  = stream_int_update_embedded;
-	si->shutr   = stream_int_shutr;
-	si->shutw   = stream_int_shutw;
-	si->chk_rcv = stream_int_chk_rcv;
-	si->chk_snd = stream_int_chk_snd;
-	si->connect = NULL;
+	stream_interface_prepare(si, &stream_int_embedded);
+	si->proto = NULL;
 	set_target_applet(&si->target, app);
 	si->applet.state = 0;
 	si->release   = app->release;
@@ -335,12 +353,8 @@ struct task *stream_int_register_handler_task(struct stream_interface *si,
 
 	DPRINTF(stderr, "registering handler %p for si %p (was %p)\n", fct, si, si->owner);
 
-	si->update  = stream_int_update;
-	si->shutr   = stream_int_shutr;
-	si->shutw   = stream_int_shutw;
-	si->chk_rcv = stream_int_chk_rcv;
-	si->chk_snd = stream_int_chk_snd;
-	si->connect = NULL;
+	stream_interface_prepare(si, &stream_int_task);
+	si->proto = NULL;
 	clear_target(&si->target);
 	si->release   = NULL;
 	si->flags |= SI_FL_WAIT_DATA;

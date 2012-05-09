@@ -179,39 +179,38 @@ static struct proxy *alloc_stats_fe(const char *name)
 }
 
 /* This function parses a "stats" statement in the "global" section. It returns
- * -1 if there is any error, otherwise zero. If it returns -1, it may write an
- * error message into ther <err> buffer, for at most <errlen> bytes, trailing
- * zero included. The trailing '\n' must not be written. The function must be
- * called with <args> pointing to the first word after "stats".
+ * -1 if there is any error, otherwise zero. If it returns -1, it will write an
+ * error message into the <err> buffer which will be preallocated. The trailing
+ * '\n' must not be written. The function must be called with <args> pointing to
+ * the first word after "stats".
  */
 static int stats_parse_global(char **args, int section_type, struct proxy *curpx,
-			      struct proxy *defpx, char *err, int errlen)
+			      struct proxy *defpx, char **err)
 {
-	args++;
-	if (!strcmp(args[0], "socket")) {
+	if (!strcmp(args[1], "socket")) {
 		struct sockaddr_un *su;
 		int cur_arg;
 
-		if (*args[1] == 0) {
-			snprintf(err, errlen, "'stats socket' in global section expects a path to a UNIX socket");
+		if (*args[2] == 0) {
+			memprintf(err, "'%s %s' in global section expects a path to a UNIX socket", args[0], args[1]);
 			return -1;
 		}
 
 		if (global.stats_sock.state != LI_NEW) {
-			snprintf(err, errlen, "'stats socket' already specified in global section");
+			memprintf(err, "'%s %s' already specified in global section", args[0], args[1]);
 			return -1;
 		}
 
-		su = str2sun(args[1]);
+		su = str2sun(args[2]);
 		if (!su) {
-			snprintf(err, errlen, "'stats socket' path would require truncation");
+			memprintf(err, "'%s %s' : path would require truncation", args[0], args[1]);
 			return -1;
 		}
 		memcpy(&global.stats_sock.addr, su, sizeof(struct sockaddr_un)); // guaranteed to fit
 
 		if (!global.stats_fe) {
 			if ((global.stats_fe = alloc_stats_fe("GLOBAL")) == NULL) {
-				snprintf(err, errlen, "out of memory");
+				memprintf(err, "'%s %s' : out of memory trying to allocate a frontend", args[0], args[1]);
 				return -1;
 			}
 		}
@@ -231,7 +230,7 @@ static int stats_parse_global(char **args, int section_type, struct proxy *curpx
 		global.stats_sock.next  = global.stats_fe->listen;
 		global.stats_fe->listen = &global.stats_sock;
 
-		cur_arg = 2;
+		cur_arg = 3;
 		while (*args[cur_arg]) {
 			if (!strcmp(args[cur_arg], "uid")) {
 				global.stats_sock.perm.ux.uid = atol(args[cur_arg + 1]);
@@ -249,8 +248,7 @@ static int stats_parse_global(char **args, int section_type, struct proxy *curpx
 				struct passwd *user;
 				user = getpwnam(args[cur_arg + 1]);
 				if (!user) {
-					snprintf(err, errlen, "unknown user '%s' in 'global' section ('stats user')",
-						 args[cur_arg + 1]);
+					memprintf(err, "'%s %s' : unknown user '%s'", args[0], args[1], args[cur_arg + 1]);
 					return -1;
 				}
 				global.stats_sock.perm.ux.uid = user->pw_uid;
@@ -260,8 +258,7 @@ static int stats_parse_global(char **args, int section_type, struct proxy *curpx
 				struct group *group;
 				group = getgrnam(args[cur_arg + 1]);
 				if (!group) {
-					snprintf(err, errlen, "unknown group '%s' in 'global' section ('stats group')",
-						 args[cur_arg + 1]);
+					memprintf(err, "'%s %s' : unknown group '%s'", args[0], args[1], args[cur_arg + 1]);
 					return -1;
 				}
 				global.stats_sock.perm.ux.gid = group->gr_gid;
@@ -275,13 +272,15 @@ static int stats_parse_global(char **args, int section_type, struct proxy *curpx
 				else if (!strcmp(args[cur_arg+1], "admin"))
 					global.stats_sock.perm.ux.level = ACCESS_LVL_ADMIN;
 				else {
-					snprintf(err, errlen, "'stats socket level' only supports 'user', 'operator', and 'admin'");
+					memprintf(err, "'%s %s' : '%s' only supports 'user', 'operator', and 'admin' (got '%s')",
+						  args[0], args[1], args[cur_arg], args[cur_arg+1]);
 					return -1;
 				}
 				cur_arg += 2;
 			}
 			else {
-				snprintf(err, errlen, "'stats socket' only supports 'user', 'uid', 'group', 'gid', 'level', and 'mode'");
+				memprintf(err, "'%s %s' only supports 'user', 'uid', 'group', 'gid', 'level', and 'mode' (got '%s')",
+					  args[0], args[1], args[cur_arg]);
 				return -1;
 			}
 		}
@@ -289,45 +288,45 @@ static int stats_parse_global(char **args, int section_type, struct proxy *curpx
 		uxst_add_listener(&global.stats_sock);
 		global.maxsock++;
 	}
-	else if (!strcmp(args[0], "timeout")) {
+	else if (!strcmp(args[1], "timeout")) {
 		unsigned timeout;
-		const char *res = parse_time_err(args[1], &timeout, TIME_UNIT_MS);
+		const char *res = parse_time_err(args[2], &timeout, TIME_UNIT_MS);
 
 		if (res) {
-			snprintf(err, errlen, "unexpected character '%c' in 'stats timeout' in 'global' section", *res);
+			memprintf(err, "'%s %s' : unexpected character '%c'", args[0], args[1], *res);
 			return -1;
 		}
 
 		if (!timeout) {
-			snprintf(err, errlen, "a positive value is expected for 'stats timeout' in 'global section'");
+			memprintf(err, "'%s %s' expects a positive value", args[0], args[1]);
 			return -1;
 		}
 		if (!global.stats_fe) {
 			if ((global.stats_fe = alloc_stats_fe("GLOBAL")) == NULL) {
-				snprintf(err, errlen, "out of memory");
+				memprintf(err, "'%s %s' : out of memory trying to allocate a frontend", args[0], args[1]);
 				return -1;
 			}
 		}
 		global.stats_fe->timeout.client = MS_TO_TICKS(timeout);
 	}
-	else if (!strcmp(args[0], "maxconn")) {
-		int maxconn = atol(args[1]);
+	else if (!strcmp(args[1], "maxconn")) {
+		int maxconn = atol(args[2]);
 
 		if (maxconn <= 0) {
-			snprintf(err, errlen, "a positive value is expected for 'stats maxconn' in 'global section'");
+			memprintf(err, "'%s %s' expects a positive value", args[0], args[1]);
 			return -1;
 		}
 
 		if (!global.stats_fe) {
 			if ((global.stats_fe = alloc_stats_fe("GLOBAL")) == NULL) {
-				snprintf(err, errlen, "out of memory");
+				memprintf(err, "'%s %s' : out of memory trying to allocate a frontend", args[0], args[1]);
 				return -1;
 			}
 		}
 		global.stats_fe->maxconn = maxconn;
 	}
 	else {
-		snprintf(err, errlen, "'stats' only supports 'socket', 'maxconn' and 'timeout' in 'global' section");
+		memprintf(err, "'%s' only supports 'socket', 'maxconn' and 'timeout' (got '%s')", args[0], args[1]);
 		return -1;
 	}
 	return 0;
@@ -992,7 +991,7 @@ static int stats_dump_table_head_to_buffer(struct chunk *msg, struct stream_inte
 	if (target && s->listener->perm.ux.level < ACCESS_LVL_OPER)
 		chunk_printf(msg, "# contents not dumped due to insufficient privileges\n");
 
-	if (buffer_feed_chunk(si->ib, msg) >= 0)
+	if (bi_putchk(si->ib, msg) == -1)
 		return 0;
 
 	return 1;
@@ -1063,7 +1062,7 @@ static int stats_dump_table_entry_to_buffer(struct chunk *msg, struct stream_int
 	}
 	chunk_printf(msg, "\n");
 
-	if (buffer_feed_chunk(si->ib, msg) >= 0)
+	if (bi_putchk(si->ib, msg) == -1)
 		return 0;
 
 	return 1;
@@ -1488,7 +1487,7 @@ static int stats_sock_parse_request(struct stream_interface *si, char *line)
 
 			/* return server's effective weight at the moment */
 			snprintf(trash, sizeof(trash), "%d (initial %d)\n", sv->uweight, sv->iweight);
-			buffer_feed(si->ib, trash);
+			bi_putstr(si->ib, trash);
 			return 1;
 		}
 		else { /* not "get weight" */
@@ -1940,7 +1939,7 @@ static void cli_io_handler(struct stream_interface *si)
 			/* Let's close for real now. We just close the request
 			 * side, the conditions below will complete if needed.
 			 */
-			si->shutw(si);
+			si->sock.shutw(si);
 			break;
 		}
 		else if (si->applet.st0 == STAT_CLI_GETREQ) {
@@ -1950,7 +1949,7 @@ static void cli_io_handler(struct stream_interface *si)
 			if (buffer_almost_full(si->ib))
 				break;
 
-			reql = buffer_get_line(si->ob, trash, sizeof(trash));
+			reql = bo_getline(si->ob, trash, sizeof(trash));
 			if (reql <= 0) { /* closed or EOL not found */
 				if (reql == 0)
 					break;
@@ -2010,7 +2009,7 @@ static void cli_io_handler(struct stream_interface *si)
 			}
 
 			/* re-adjust req buffer */
-			buffer_skip(si->ob, reql);
+			bo_skip(si->ob, reql);
 			req->flags |= BF_READ_DONTWAIT; /* we plan to read small requests */
 		}
 		else {	/* output functions: first check if the output buffer is closed then abort */
@@ -2021,7 +2020,7 @@ static void cli_io_handler(struct stream_interface *si)
 
 			switch (si->applet.st0) {
 			case STAT_CLI_PRINT:
-				if (buffer_feed(si->ib, si->applet.ctx.cli.msg) < 0)
+				if (bi_putstr(si->ib, si->applet.ctx.cli.msg) != -1)
 					si->applet.st0 = STAT_CLI_PROMPT;
 				break;
 			case STAT_CLI_O_INFO:
@@ -2051,7 +2050,7 @@ static void cli_io_handler(struct stream_interface *si)
 
 			/* The post-command prompt is either LF alone or LF + '> ' in interactive mode */
 			if (si->applet.st0 == STAT_CLI_PROMPT) {
-				if (buffer_feed(si->ib, si->applet.st1 ? "\n> " : "\n") < 0)
+				if (bi_putstr(si->ib, si->applet.st1 ? "\n> " : "\n") != -1)
 					si->applet.st0 = STAT_CLI_GETREQ;
 			}
 
@@ -2064,7 +2063,7 @@ static void cli_io_handler(struct stream_interface *si)
 			 * buffer is empty. This still allows pipelined requests
 			 * to be sent in non-interactive mode.
 			 */
-			if ((res->flags & (BF_SHUTW|BF_SHUTW_NOW)) || (!si->applet.st1 && !req->send_max)) {
+			if ((res->flags & (BF_SHUTW|BF_SHUTW_NOW)) || (!si->applet.st1 && !req->o)) {
 				si->applet.st0 = STAT_CLI_END;
 				continue;
 			}
@@ -2082,7 +2081,7 @@ static void cli_io_handler(struct stream_interface *si)
 		 * we forward the close to the request side so that it flows upstream to
 		 * the client.
 		 */
-		si->shutw(si);
+		si->sock.shutw(si);
 	}
 
 	if ((req->flags & BF_SHUTW) && (si->state == SI_ST_EST) && (si->applet.st0 < STAT_CLI_OUTPUT)) {
@@ -2092,21 +2091,21 @@ static void cli_io_handler(struct stream_interface *si)
 		 * the client side has closed. So we'll forward this state downstream
 		 * on the response buffer.
 		 */
-		si->shutr(si);
+		si->sock.shutr(si);
 		res->flags |= BF_READ_NULL;
 	}
 
 	/* update all other flags and resync with the other side */
-	si->update(si);
+	si->sock.update(si);
 
 	/* we don't want to expire timeouts while we're processing requests */
 	si->ib->rex = TICK_ETERNITY;
 	si->ob->wex = TICK_ETERNITY;
 
  out:
-	DPRINTF(stderr, "%s@%d: st=%d, rqf=%x, rpf=%x, rql=%d, rqs=%d, rl=%d, rs=%d\n",
+	DPRINTF(stderr, "%s@%d: st=%d, rqf=%x, rpf=%x, rqh=%d, rqs=%d, rh=%d, rs=%d\n",
 		__FUNCTION__, __LINE__,
-		si->state, req->flags, res->flags, req->l, req->send_max, res->l, res->send_max);
+		si->state, req->flags, res->flags, req->i, req->o, res->i, res->o);
 
 	if (unlikely(si->state == SI_ST_DIS || si->state == SI_ST_CLO)) {
 		/* check that we have released everything then unregister */
@@ -2137,7 +2136,7 @@ static int stats_dump_raw_to_buffer(struct stream_interface *si)
 	case STAT_ST_HEAD:
 		if (si->applet.ctx.stats.flags & STAT_SHOW_STAT) {
 			print_csv_header(&msg);
-			if (buffer_feed_chunk(si->ib, &msg) >= 0)
+			if (bi_putchk(si->ib, &msg) == -1)
 				return 0;
 		}
 
@@ -2187,7 +2186,7 @@ static int stats_dump_raw_to_buffer(struct stream_interface *si)
 				     nb_tasks_cur, run_queue_cur, idle_pct,
 				     global.node, global.desc?global.desc:""
 				     );
-			if (buffer_feed_chunk(si->ib, &msg) >= 0)
+			if (bi_putchk(si->ib, &msg) == -1)
 				return 0;
 		}
 
@@ -2260,7 +2259,7 @@ static int stats_http_redir(struct stream_interface *si, struct uri_auth *uri)
 				stat_status_codes[STAT_STATUS_UNKN]);
 		chunk_printf(&msg, "\r\n\r\n");
 
-		if (buffer_feed_chunk(si->ib, &msg) >= 0)
+		if (bi_putchk(si->ib, &msg) == -1)
 			return 0;
 
 		s->txn.status = 303;
@@ -2299,26 +2298,26 @@ static void http_stats_io_handler(struct stream_interface *si)
 		if (s->txn.meth == HTTP_METH_POST) {
 			if (stats_http_redir(si, s->be->uri_auth)) {
 				si->applet.st0 = 1;
-				si->shutw(si);
+				si->sock.shutw(si);
 			}
 		} else {
 			if (stats_dump_http(si, s->be->uri_auth)) {
 				si->applet.st0 = 1;
-				si->shutw(si);
+				si->sock.shutw(si);
 			}
 		}
 	}
 
 	if ((res->flags & BF_SHUTR) && (si->state == SI_ST_EST))
-		si->shutw(si);
+		si->sock.shutw(si);
 
 	if ((req->flags & BF_SHUTW) && (si->state == SI_ST_EST) && si->applet.st0) {
-		si->shutr(si);
+		si->sock.shutr(si);
 		res->flags |= BF_READ_NULL;
 	}
 
 	/* update all other flags and resync with the other side */
-	si->update(si);
+	si->sock.update(si);
 
 	/* we don't want to expire timeouts while we're processing requests */
 	si->ib->rex = TICK_ETERNITY;
@@ -2368,7 +2367,7 @@ static int stats_dump_http(struct stream_interface *si, struct uri_auth *uri)
 		chunk_printf(&msg, "\r\n");
 
 		s->txn.status = 200;
-		if (buffer_feed_chunk(rep, &msg) >= 0)
+		if (bi_putchk(rep, &msg) == -1)
 			return 0;
 
 		if (!(s->flags & SN_ERR_MASK))  // this is not really an error but it is
@@ -2500,7 +2499,7 @@ static int stats_dump_http(struct stream_interface *si, struct uri_auth *uri)
 			print_csv_header(&msg);
 #endif /* USE_API */
 		}
-		if (buffer_feed_chunk(rep, &msg) >= 0)
+		if (bi_putchk(rep, &msg) == -1)
 			return 0;
 
 		si->applet.state = STAT_ST_INFO;
@@ -2675,7 +2674,7 @@ static int stats_dump_http(struct stream_interface *si, struct uri_auth *uri)
 				chunk_printf(&msg,"<p>\n");
 			}
 
-			if (buffer_feed_chunk(rep, &msg) >= 0)
+			if (bi_putchk(rep, &msg) == -1)
 				return 0;
 		}
 
@@ -2706,7 +2705,7 @@ static int stats_dump_http(struct stream_interface *si, struct uri_auth *uri)
 	case STAT_ST_END:
 		if (!(si->applet.ctx.stats.flags & STAT_FMT_CSV)) {
 			chunk_printf(&msg, "</body></html>\n");
-			if (buffer_feed_chunk(rep, &msg) >= 0)
+			if (bi_putchk(rep, &msg) == -1)
 				return 0;
 		}
 
@@ -2835,7 +2834,7 @@ static int stats_dump_proxy(struct stream_interface *si, struct proxy *px, struc
 				     "<th>Thrtle</th>\n"
 				     "</tr>");
 
-			if (buffer_feed_chunk(rep, &msg) >= 0)
+			if (bi_putchk(rep, &msg) == -1)
 				return 0;
 		}
 
@@ -2992,7 +2991,7 @@ static int stats_dump_proxy(struct stream_interface *si, struct proxy *px, struc
 				chunk_printf(&msg, "\n");
 			}
 
-			if (buffer_feed_chunk(rep, &msg) >= 0)
+			if (bi_putchk(rep, &msg) == -1)
 				return 0;
 		}
 
@@ -3128,7 +3127,7 @@ static int stats_dump_proxy(struct stream_interface *si, struct proxy *px, struc
 				     relative_pid, px->uuid, l->luid, STATS_TYPE_SO);
 			}
 
-			if (buffer_feed_chunk(rep, &msg) >= 0)
+			if (bi_putchk(rep, &msg) == -1)
 				return 0;
 		}
 
@@ -3538,7 +3537,7 @@ static int stats_dump_proxy(struct stream_interface *si, struct proxy *px, struc
 				/* finish with EOL */
 				chunk_printf(&msg, "\n");
 			}
-			if (buffer_feed_chunk(rep, &msg) >= 0)
+			if (bi_putchk(rep, &msg) == -1)
 				return 0;
 		} /* for sv */
 
@@ -3733,7 +3732,7 @@ static int stats_dump_proxy(struct stream_interface *si, struct proxy *px, struc
 				chunk_printf(&msg, "\n");
 
 			}
-			if (buffer_feed_chunk(rep, &msg) >= 0)
+			if (bi_putchk(rep, &msg) == -1)
 				return 0;
 		}
 
@@ -3761,7 +3760,7 @@ static int stats_dump_proxy(struct stream_interface *si, struct proxy *px, struc
 
 			chunk_printf(&msg, "<p>\n");
 
-			if (buffer_feed_chunk(rep, &msg) >= 0)
+			if (bi_putchk(rep, &msg) == -1)
 				return 0;
 		}
 
@@ -3797,7 +3796,7 @@ static int stats_dump_full_sess_to_buffer(struct stream_interface *si)
 	if (si->applet.ctx.sess.section > 0 && si->applet.ctx.sess.uid != sess->uniq_id) {
 		/* session changed, no need to go any further */
 		chunk_printf(&msg, "  *** session terminated while we were watching it ***\n");
-		if (buffer_feed_chunk(si->ib, &msg) >= 0)
+		if (bi_putchk(si->ib, &msg) == -1)
 			return 0;
 		si->applet.ctx.sess.target = NULL;
 		si->applet.ctx.sess.uid = 0;
@@ -3955,11 +3954,11 @@ static int stats_dump_full_sess_to_buffer(struct stream_interface *si)
 
 
 		chunk_printf(&msg,
-			     "  req=%p (f=0x%06x an=0x%x l=%d sndmx=%d pipe=%d fwd=%d)\n"
+			     "  req=%p (f=0x%06x an=0x%x i=%d o=%d pipe=%d fwd=%d)\n"
 			     "      an_exp=%s",
 			     sess->req,
 			     sess->req->flags, sess->req->analysers,
-			     sess->req->l, sess->req->send_max,
+			     sess->req->i, sess->req->o,
 			     sess->req->pipe ? sess->req->pipe->data : 0,
 			     sess->req->to_forward,
 			     sess->req->analyse_exp ?
@@ -3974,22 +3973,21 @@ static int stats_dump_full_sess_to_buffer(struct stream_interface *si)
 
 		chunk_printf(&msg,
 			     " wex=%s\n"
-			     "      data=%p r=%d w=%d lr=%d total=%lld\n",
+			     "      data=%p p=%d next=%d total=%lld\n",
 			     sess->req->wex ?
 			     human_time(TICKS_TO_MS(sess->req->wex - now_ms),
 					TICKS_TO_MS(1000)) : "<NEVER>",
 			     sess->req->data,
-			     (int)(sess->req->r - sess->req->data),
-			     (int)(sess->req->w - sess->req->data),
-			     (int)(sess->req->lr - sess->req->data),
+			     (int)(sess->req->p - sess->req->data),
+			     sess->txn.req.next,
 			     sess->req->total);
 
 		chunk_printf(&msg,
-			     "  res=%p (f=0x%06x an=0x%x l=%d sndmx=%d pipe=%d fwd=%d)\n"
+			     "  res=%p (f=0x%06x an=0x%x i=%d o=%d pipe=%d fwd=%d)\n"
 			     "      an_exp=%s",
 			     sess->rep,
 			     sess->rep->flags, sess->rep->analysers,
-			     sess->rep->l, sess->rep->send_max,
+			     sess->rep->i, sess->rep->o,
 			     sess->rep->pipe ? sess->rep->pipe->data : 0,
 			     sess->rep->to_forward,
 			     sess->rep->analyse_exp ?
@@ -4004,17 +4002,16 @@ static int stats_dump_full_sess_to_buffer(struct stream_interface *si)
 
 		chunk_printf(&msg,
 			     " wex=%s\n"
-			     "      data=%p r=%d w=%d lr=%d total=%lld\n",
+			     "      data=%p p=%d next=%d total=%lld\n",
 			     sess->rep->wex ?
 			     human_time(TICKS_TO_MS(sess->rep->wex - now_ms),
 					TICKS_TO_MS(1000)) : "<NEVER>",
 			     sess->rep->data,
-			     (int)(sess->rep->r - sess->rep->data),
-			     (int)(sess->rep->w - sess->rep->data),
-			     (int)(sess->rep->lr - sess->rep->data),
+			     (int)(sess->rep->p - sess->rep->data),
+			     sess->txn.rsp.next,
 			     sess->rep->total);
 
-		if (buffer_feed_chunk(si->ib, &msg) >= 0)
+		if (bi_putchk(si->ib, &msg) == -1)
 			return 0;
 
 		/* use other states to dump the contents */
@@ -4129,9 +4126,9 @@ static int stats_dump_sess_to_buffer(struct stream_interface *si)
 				     curr_sess->task->calls);
 
 			chunk_printf(&msg,
-				     " rq[f=%06xh,l=%d,an=%02xh,rx=%s",
+				     " rq[f=%06xh,i=%d,an=%02xh,rx=%s",
 				     curr_sess->req->flags,
-				     curr_sess->req->l,
+				     curr_sess->req->i,
 				     curr_sess->req->analysers,
 				     curr_sess->req->rex ?
 				     human_time(TICKS_TO_MS(curr_sess->req->rex - now_ms),
@@ -4150,9 +4147,9 @@ static int stats_dump_sess_to_buffer(struct stream_interface *si)
 						TICKS_TO_MS(1000)) : "");
 
 			chunk_printf(&msg,
-				     " rp[f=%06xh,l=%d,an=%02xh,rx=%s",
+				     " rp[f=%06xh,i=%d,an=%02xh,rx=%s",
 				     curr_sess->rep->flags,
-				     curr_sess->rep->l,
+				     curr_sess->rep->i,
 				     curr_sess->rep->analysers,
 				     curr_sess->rep->rex ?
 				     human_time(TICKS_TO_MS(curr_sess->rep->rex - now_ms),
@@ -4198,7 +4195,7 @@ static int stats_dump_sess_to_buffer(struct stream_interface *si)
 
 			chunk_printf(&msg, "\n");
 
-			if (buffer_feed_chunk(si->ib, &msg) >= 0) {
+			if (bi_putchk(si->ib, &msg) == -1) {
 				/* let's try again later from this session. We add ourselves into
 				 * this session's users so that it can remove us upon termination.
 				 */
@@ -4217,7 +4214,7 @@ static int stats_dump_sess_to_buffer(struct stream_interface *si)
 			else
 				chunk_printf(&msg, "Session not found.\n");
 
-			if (buffer_feed_chunk(si->ib, &msg) >= 0)
+			if (bi_putchk(si->ib, &msg) == -1)
 				return 0;
 
 			si->applet.ctx.sess.target = NULL;
@@ -4477,7 +4474,7 @@ static int stats_dump_errors_to_buffer(struct stream_interface *si)
 			     tm.tm_hour, tm.tm_min, tm.tm_sec, (int)(date.tv_usec/1000),
 			     error_snapshot_id);
 
-		if (buffer_feed_chunk(si->ib, &msg) >= 0) {
+		if (bi_putchk(si->ib, &msg) == -1) {
 			/* Socket buffer full. Let's try again later from the same point */
 			return 0;
 		}
@@ -4512,44 +4509,56 @@ static int stats_dump_errors_to_buffer(struct stream_interface *si)
 
 			char pn[INET6_ADDRSTRLEN];
 			struct tm tm;
+			int port;
 
 			get_localtime(es->when.tv_sec, &tm);
 			chunk_printf(&msg, " \n[%02d/%s/%04d:%02d:%02d:%02d.%03d]",
 				     tm.tm_mday, monthname[tm.tm_mon], tm.tm_year+1900,
 				     tm.tm_hour, tm.tm_min, tm.tm_sec, (int)(es->when.tv_usec/1000));
 
-			addr_to_str(&es->src, pn, sizeof(pn));
+			switch (addr_to_str(&es->src, pn, sizeof(pn))) {
+			case AF_INET:
+			case AF_INET6:
+				port = get_host_port(&es->src);
+				break;
+			default:
+				port = 0;
+			}
+
 			switch (si->applet.ctx.errors.buf) {
 			case 0:
 				chunk_printf(&msg,
 					     " frontend %s (#%d): invalid request\n"
-					     "  src %s, session #%d, backend %s (#%d), server %s (#%d)\n"
-					     "  HTTP internal state %d, buffer flags 0x%08x, event #%u\n"
-					     "  request length %d bytes, error at position %d:\n \n",
+					     "  backend %s (#%d)",
 					     si->applet.ctx.errors.px->id, si->applet.ctx.errors.px->uuid,
-					     pn, es->sid, (es->oe->cap & PR_CAP_BE) ? es->oe->id : "<NONE>",
-					     (es->oe->cap & PR_CAP_BE) ? es->oe->uuid : -1,
-					     es->srv ? es->srv->id : "<NONE>",
-					     es->srv ? es->srv->puid : -1,
-					     es->state, es->flags, es->ev_id,
-					     es->len, es->pos);
+					     (es->oe->cap & PR_CAP_BE) ? es->oe->id : "<NONE>",
+					     (es->oe->cap & PR_CAP_BE) ? es->oe->uuid : -1);
 				break;
 			case 1:
 				chunk_printf(&msg,
 					     " backend %s (#%d) : invalid response\n"
-					     "  src %s, session #%d, frontend %s (#%d), server %s (#%d)\n"
-					     "  HTTP internal state %d, buffer flags 0x%08x, event #%u\n"
-					     "  response length %d bytes, error at position %d:\n \n",
+					     "  frontend %s (#%d)",
 					     si->applet.ctx.errors.px->id, si->applet.ctx.errors.px->uuid,
-					     pn, es->sid, es->oe->id, es->oe->uuid,
-					     es->srv ? es->srv->id : "<NONE>",
-					     es->srv ? es->srv->puid : -1,
-					     es->state, es->flags, es->ev_id,
-					     es->len, es->pos);
+					     es->oe->id, es->oe->uuid);
 				break;
 			}
 
-			if (buffer_feed_chunk(si->ib, &msg) >= 0) {
+			chunk_printf(&msg,
+				     ", server %s (#%d), event #%u\n"
+				     "  src %s:%d, session #%d, session flags 0x%08x\n"
+				     "  HTTP msg state %d, msg flags 0x%08x, tx flags 0x%08x\n"
+				     "  HTTP chunk len %lld bytes, HTTP body len %lld bytes\n"
+				     "  buffer flags 0x%08x, out %d bytes, total %lld bytes\n"
+				     "  pending %d bytes, wrapping at %d, error at position %d:\n \n",
+				     es->srv ? es->srv->id : "<NONE>", es->srv ? es->srv->puid : -1,
+				     es->ev_id,
+				     pn, port, es->sid, es->s_flags,
+				     es->state, es->m_flags, es->t_flags,
+				     es->m_clen, es->m_blen,
+				     es->b_flags, es->b_out, es->b_tot,
+				     es->len, es->b_wrap, es->pos);
+
+			if (bi_putchk(si->ib, &msg) == -1) {
 				/* Socket buffer full. Let's try again later from the same point */
 				return 0;
 			}
@@ -4561,7 +4570,7 @@ static int stats_dump_errors_to_buffer(struct stream_interface *si)
 			/* the snapshot changed while we were dumping it */
 			chunk_printf(&msg,
 				     "  WARNING! update detected on this snapshot, dump interrupted. Please re-check!\n");
-			if (buffer_feed_chunk(si->ib, &msg) >= 0)
+			if (bi_putchk(si->ib, &msg) == -1)
 				return 0;
 			goto next;
 		}
@@ -4576,7 +4585,7 @@ static int stats_dump_errors_to_buffer(struct stream_interface *si)
 			if (newptr == si->applet.ctx.errors.ptr)
 				return 0;
 
-			if (buffer_feed_chunk(si->ib, &msg) >= 0) {
+			if (bi_putchk(si->ib, &msg) == -1) {
 				/* Socket buffer full. Let's try again later from the same point */
 				return 0;
 			}

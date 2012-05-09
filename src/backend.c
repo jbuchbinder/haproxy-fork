@@ -28,6 +28,7 @@
 #include <types/global.h>
 
 #include <proto/acl.h>
+#include <proto/arg.h>
 #include <proto/backend.h>
 #include <proto/frontend.h>
 #include <proto/lb_chash.h>
@@ -35,6 +36,7 @@
 #include <proto/lb_fwlc.h>
 #include <proto/lb_fwrr.h>
 #include <proto/lb_map.h>
+#include <proto/protocols.h>
 #include <proto/proto_http.h>
 #include <proto/proto_tcp.h>
 #include <proto/queue.h>
@@ -254,11 +256,11 @@ struct server *get_server_ph_post(struct session *s)
 	struct proxy    *px   = s->be;
 	unsigned int     plen = px->url_param_len;
 	unsigned long    len  = msg->body_len;
-	const char      *params = req->data + msg->sov;
+	const char      *params = req->p + msg->sov;
 	const char      *p    = params;
 
-	if (len > req->l - (msg->sov - msg->som))
-		len = req->l - (msg->sov - msg->som);
+	if (len > req->i - (msg->sov - msg->som))
+		len = req->i - (msg->sov - msg->som);
 
 	if (len == 0)
 		return NULL;
@@ -340,7 +342,7 @@ struct server *get_server_hh(struct session *s)
 	ctx.idx = 0;
 
 	/* if the message is chunked, we skip the chunk size, but use the value as len */
-	http_find_header2(px->hh_name, plen, msg->sol, &txn->hdr_idx, &ctx);
+	http_find_header2(px->hh_name, plen, s->req->p + msg->sol, &txn->hdr_idx, &ctx);
 
 	/* if the header is not found or empty, let's fallback to round robin */
 	if (!ctx.idx || !ctx.vlen)
@@ -393,6 +395,7 @@ struct server *get_server_hh(struct session *s)
 		return map_get_server_hash(px, hash);
 }
 
+/* RDP Cookie HASH.  */
 struct server *get_server_rch(struct session *s)
 {
 	unsigned long    hash = 0;
@@ -400,23 +403,24 @@ struct server *get_server_rch(struct session *s)
 	unsigned long    len;
 	const char      *p;
 	int              ret;
-	struct acl_expr  expr;
-	struct acl_test  test;
+	struct sample    smp;
+	struct arg       args[2];
 
 	/* tot_weight appears to mean srv_count */
 	if (px->lbprm.tot_weight == 0)
 		return NULL;
 
-	memset(&expr, 0, sizeof(expr));
-	memset(&test, 0, sizeof(test));
+	memset(&smp, 0, sizeof(smp));
 
-	expr.arg.str = px->hh_name;
-	expr.arg_len = px->hh_len;
+	args[0].type = ARGT_STR;
+	args[0].data.str.str = px->hh_name;
+	args[0].data.str.len = px->hh_len;
+	args[1].type = ARGT_STOP;
 
-	ret = acl_fetch_rdp_cookie(px, s, NULL, ACL_DIR_REQ, &expr, &test);
-	len = temp_pattern.data.str.len;
+	ret = smp_fetch_rdp_cookie(px, s, NULL, SMP_OPT_DIR_REQ|SMP_OPT_FINAL, args, &smp);
+	len = smp.data.str.len;
 
-	if (ret == 0 || (test.flags & ACL_TEST_F_MAY_CHANGE) || len == 0)
+	if (ret == 0 || (smp.flags & SMP_F_MAY_CHANGE) || len == 0)
 		return NULL;
 
 	/* note: we won't hash if there's only one server left */
@@ -426,7 +430,7 @@ struct server *get_server_rch(struct session *s)
 	/* Found a the hh_name in the headers.
 	 * we will compute the hash based on this value ctx.val.
 	 */
-	p = temp_pattern.data.str.str;
+	p = smp.data.str.str;
 	while (len) {
 		hash = *p + (hash << 6) + (hash << 16) - hash;
 		len--;
@@ -559,7 +563,7 @@ int assign_server(struct session *s)
 				if (s->txn.req.msg_state < HTTP_MSG_BODY)
 					break;
 				srv = get_server_uh(s->be,
-						    s->txn.req.sol + s->txn.req.sl.rq.u,
+						    s->req->p + s->txn.req.sol + s->txn.req.sl.rq.u,
 						    s->txn.req.sl.rq.u_l);
 				break;
 
@@ -569,7 +573,7 @@ int assign_server(struct session *s)
 					break;
 
 				srv = get_server_ph(s->be,
-						    s->txn.req.sol + s->txn.req.sl.rq.u,
+						    s->req->p + s->txn.req.sol + s->txn.req.sl.rq.u,
 						    s->txn.req.sl.rq.u_l);
 
 				if (!srv && s->txn.meth == HTTP_METH_POST)
@@ -970,10 +974,8 @@ int connect_server(struct session *s)
 	 * decide here if we can reuse the connection by comparing the
 	 * session's freshly assigned target with the stream interface's.
 	 */
-	stream_sock_prepare_interface(s->req->cons);
-	s->req->cons->connect = tcp_connect_server;
-	s->req->cons->get_src = getsockname;
-	s->req->cons->get_dst = getpeername;
+	stream_interface_prepare(s->req->cons, &stream_sock);
+
 	/* the target was only on the session, assign it to the SI now */
 	copy_target(&s->req->cons->target, &s->target);
 
@@ -984,13 +986,22 @@ int connect_server(struct session *s)
 		stream_sock_get_to_addr(s->req->prod);
 	}
 
+	/* set the correct protocol on the output stream interface */
+	if (s->target.type == TARG_TYPE_SERVER)
+		s->req->cons->proto = target_srv(&s->target)->proto;
+	else if (s->target.type == TARG_TYPE_PROXY) {
+		s->req->cons->proto = protocol_by_family(s->req->cons->addr.to.ss_family);
+		if (!s->req->cons->proto)
+			return SN_ERR_INTERNAL;
+	}
+
 	assign_tproxy_address(s);
 
 	/* flag for logging source ip/port */
 	if (s->fe->options2 & PR_O2_SRC_ADDR)
 		s->req->cons->flags |= SI_FL_SRC_ADDR;
 
-	err = s->req->cons->connect(s->req->cons);
+	err = s->req->cons->proto->connect(s->req->cons);
 
 	if (err != SN_ERR_NONE)
 		return err;
@@ -1106,39 +1117,40 @@ int tcp_persist_rdp_cookie(struct session *s, struct buffer *req, int an_bit)
 {
 	struct proxy    *px   = s->be;
 	int              ret;
-	struct acl_expr  expr;
-	struct acl_test  test;
+	struct sample    smp;
 	struct server *srv = px->srv;
 	struct sockaddr_in addr;
 	char *p;
+	struct arg       args[2];
 
-	DPRINTF(stderr,"[%u] %s: session=%p b=%p, exp(r,w)=%u,%u bf=%08x bl=%d analysers=%02x\n",
+	DPRINTF(stderr,"[%u] %s: session=%p b=%p, exp(r,w)=%u,%u bf=%08x bh=%d analysers=%02x\n",
 		now_ms, __FUNCTION__,
 		s,
 		req,
 		req->rex, req->wex,
 		req->flags,
-		req->l,
+		req->i,
 		req->analysers);
 
 	if (s->flags & SN_ASSIGNED)
 		goto no_cookie;
 
-	memset(&expr, 0, sizeof(expr));
-	memset(&test, 0, sizeof(test));
+	memset(&smp, 0, sizeof(smp));
 
-	expr.arg.str = s->be->rdp_cookie_name;
-	expr.arg_len = s->be->rdp_cookie_len;
+	args[0].type = ARGT_STR;
+	args[0].data.str.str = s->be->rdp_cookie_name;
+	args[0].data.str.len = s->be->rdp_cookie_len;
+	args[1].type = ARGT_STOP;
 
-	ret = acl_fetch_rdp_cookie(px, s, NULL, ACL_DIR_REQ, &expr, &test);
-	if (ret == 0 || (test.flags & ACL_TEST_F_MAY_CHANGE) || temp_pattern.data.str.len == 0)
+	ret = smp_fetch_rdp_cookie(px, s, NULL, SMP_OPT_DIR_REQ|SMP_OPT_FINAL, args, &smp);
+	if (ret == 0 || (smp.flags & SMP_F_MAY_CHANGE) || smp.data.str.len == 0)
 		goto no_cookie;
 
 	memset(&addr, 0, sizeof(addr));
 	addr.sin_family = AF_INET;
 
 	/* Considering an rdp cookie detected using acl, str ended with <cr><lf> and should return */
-	addr.sin_addr.s_addr = strtoul(temp_pattern.data.str.str, &p, 10);
+	addr.sin_addr.s_addr = strtoul(smp.data.str.str, &p, 10);
 	if (*p != '.')
 		goto no_cookie;
 	p++;
@@ -1203,12 +1215,12 @@ const char *backend_lb_algo_str(int algo) {
 
 /* This function parses a "balance" statement in a backend section describing
  * <curproxy>. It returns -1 if there is any error, otherwise zero. If it
- * returns -1, it may write an error message into ther <err> buffer, for at
- * most <errlen> bytes, trailing zero included. The trailing '\n' will not be
- * written. The function must be called with <args> pointing to the first word
- * after "balance".
+ * returns -1, it will write an error message into the <err> buffer which will
+ * automatically be allocated and must be passed as NULL. The trailing '\n'
+ * will not be written. The function must be called with <args> pointing to the
+ * first word after "balance".
  */
-int backend_parse_balance(const char **args, char *err, int errlen, struct proxy *curproxy)
+int backend_parse_balance(const char **args, char **err, struct proxy *curproxy)
 {
 	if (!*(args[0])) {
 		/* if no option is set, use round-robin by default */
@@ -1246,7 +1258,7 @@ int backend_parse_balance(const char **args, char *err, int errlen, struct proxy
 		while (*args[arg]) {
 			if (!strcmp(args[arg], "len")) {
 				if (!*args[arg+1] || (atoi(args[arg+1]) <= 0)) {
-					snprintf(err, errlen, "'balance uri len' expects a positive integer (got '%s').", args[arg+1]);
+					memprintf(err, "%s : '%s' expects a positive integer (got '%s').", args[0], args[arg], args[arg+1]);
 					return -1;
 				}
 				curproxy->uri_len_limit = atoi(args[arg+1]);
@@ -1254,7 +1266,7 @@ int backend_parse_balance(const char **args, char *err, int errlen, struct proxy
 			}
 			else if (!strcmp(args[arg], "depth")) {
 				if (!*args[arg+1] || (atoi(args[arg+1]) <= 0)) {
-					snprintf(err, errlen, "'balance uri depth' expects a positive integer (got '%s').", args[arg+1]);
+					memprintf(err, "%s : '%s' expects a positive integer (got '%s').", args[0], args[arg], args[arg+1]);
 					return -1;
 				}
 				/* hint: we store the position of the ending '/' (depth+1) so
@@ -1264,14 +1276,14 @@ int backend_parse_balance(const char **args, char *err, int errlen, struct proxy
 				arg += 2;
 			}
 			else {
-				snprintf(err, errlen, "'balance uri' only accepts parameters 'len' and 'depth' (got '%s').", args[arg]);
+				memprintf(err, "%s only accepts parameters 'len' and 'depth' (got '%s').", args[0], args[arg]);
 				return -1;
 			}
 		}
 	}
 	else if (!strcmp(args[0], "url_param")) {
 		if (!*args[1]) {
-			snprintf(err, errlen, "'balance url_param' requires an URL parameter name.");
+			memprintf(err, "%s requires an URL parameter name.", args[0]);
 			return -1;
 		}
 		curproxy->lbprm.algo &= ~BE_LB_ALGO;
@@ -1282,7 +1294,7 @@ int backend_parse_balance(const char **args, char *err, int errlen, struct proxy
 		curproxy->url_param_len  = strlen(args[1]);
 		if (*args[2]) {
 			if (strcmp(args[2], "check_post")) {
-				snprintf(err, errlen, "'balance url_param' only accepts check_post modifier.");
+				memprintf(err, "%s only accepts 'check_post' modifier (got '%s').", args[0], args[2]);
 				return -1;
 			}
 			if (*args[3]) {
@@ -1303,7 +1315,7 @@ int backend_parse_balance(const char **args, char *err, int errlen, struct proxy
 		end = strchr(beg, ')');
 
 		if (!end || end == beg) {
-			snprintf(err, errlen, "'balance hdr(name)' requires an http header field name.");
+			memprintf(err, "hdr requires an http header field name.");
 			return -1;
 		}
 
@@ -1317,7 +1329,7 @@ int backend_parse_balance(const char **args, char *err, int errlen, struct proxy
 
 		if (*args[1]) {
 			if (strcmp(args[1], "use_domain_only")) {
-				snprintf(err, errlen, "'balance hdr(name)' only accepts 'use_domain_only' modifier.");
+				memprintf(err, "%s only accepts 'use_domain_only' modifier (got '%s').", args[0], args[1]);
 				return -1;
 			}
 			curproxy->hh_match_domain = 1;
@@ -1335,7 +1347,7 @@ int backend_parse_balance(const char **args, char *err, int errlen, struct proxy
 			end = strchr(beg, ')');
 
 			if (!end || end == beg) {
-				snprintf(err, errlen, "'balance rdp-cookie(name)' requires an rdp cookie name.");
+				memprintf(err, "rdp-cookie : missing cookie name.");
 				return -1;
 			}
 
@@ -1349,12 +1361,12 @@ int backend_parse_balance(const char **args, char *err, int errlen, struct proxy
 			curproxy->hh_len  = strlen(curproxy->hh_name);
 		}
 		else { /* syntax */
-			snprintf(err, errlen, "'balance rdp-cookie(name)' requires an rdp cookie name.");
+			memprintf(err, "rdp-cookie : missing cookie name.");
 			return -1;
 		}
 	}
 	else {
-		snprintf(err, errlen, "'balance' only supports 'roundrobin', 'static-rr', 'leastconn', 'source', 'uri', 'url_param', 'hdr(name)' and 'rdp-cookie(name)' options.");
+		memprintf(err, "only supports 'roundrobin', 'static-rr', 'leastconn', 'source', 'uri', 'url_param', 'hdr(name)' and 'rdp-cookie(name)' options.");
 		return -1;
 	}
 	return 0;
@@ -1365,81 +1377,75 @@ int backend_parse_balance(const char **args, char *err, int errlen, struct proxy
 /*             All supported keywords must be declared here.            */
 /************************************************************************/
 
-/* set temp integer to the number of enabled servers on the proxy */
-static int
-acl_fetch_nbsrv(struct proxy *px, struct session *l4, void *l7, int dir,
-                struct acl_expr *expr, struct acl_test *test)
-{
-	test->flags = ACL_TEST_F_VOL_TEST;
-	if (expr->arg_len) {
-		/* another proxy was designated, we must look for it */
-		for (px = proxy; px; px = px->next)
-			if ((px->cap & PR_CAP_BE) && !strcmp(px->id, expr->arg.str))
-				break;
-	}
-	if (!px)
-		return 0;
-
-	if (px->srv_act)
-		temp_pattern.data.integer = px->srv_act;
-	else if (px->lbprm.fbck)
-		temp_pattern.data.integer = 1;
-	else
-		temp_pattern.data.integer = px->srv_bck;
-
-	return 1;
-}
-
-/* report in test->flags a success or failure depending on the designated
- * server's state. There is no match function involved since there's no pattern.
+/* set temp integer to the number of enabled servers on the proxy.
+ * Accepts exactly 1 argument. Argument is a backend, other types will lead to
+ * undefined behaviour.
  */
 static int
-acl_fetch_srv_is_up(struct proxy *px, struct session *l4, void *l7, int dir,
-		    struct acl_expr *expr, struct acl_test *test)
+acl_fetch_nbsrv(struct proxy *px, struct session *l4, void *l7, unsigned int opt,
+                const struct arg *args, struct sample *smp)
 {
-	struct server *srv = expr->arg.srv;
+	smp->flags = SMP_F_VOL_TEST;
+	smp->type = SMP_T_UINT;
+	px = args->data.prx;
 
-	test->flags = ACL_TEST_F_VOL_TEST;
-	if (!(srv->state & SRV_MAINTAIN) &&
-	    (!(srv->state & SRV_CHECKED) || (srv->state & SRV_RUNNING)))
-		test->flags |= ACL_TEST_F_SET_RES_PASS;
+	if (px->srv_act)
+		smp->data.uint = px->srv_act;
+	else if (px->lbprm.fbck)
+		smp->data.uint = 1;
 	else
-		test->flags |= ACL_TEST_F_SET_RES_FAIL;
+		smp->data.uint = px->srv_bck;
+
 	return 1;
 }
 
-/* set temp integer to the number of enabled servers on the proxy */
+/* report in smp->flags a success or failure depending on the designated
+ * server's state. There is no match function involved since there's no pattern.
+ * Accepts exactly 1 argument. Argument is a server, other types will lead to
+ * undefined behaviour.
+ */
 static int
-acl_fetch_connslots(struct proxy *px, struct session *l4, void *l7, int dir,
-		    struct acl_expr *expr, struct acl_test *test)
+acl_fetch_srv_is_up(struct proxy *px, struct session *l4, void *l7, unsigned int opt,
+                    const struct arg *args, struct sample *smp)
+{
+	struct server *srv = args->data.srv;
+
+	smp->flags = SMP_F_VOL_TEST;
+	smp->type = SMP_T_BOOL;
+	if (!(srv->state & SRV_MAINTAIN) &&
+	    (!(srv->state & SRV_CHECKED) || (srv->state & SRV_RUNNING)))
+		smp->data.uint = 1;
+	else
+		smp->data.uint = 0;
+	return 1;
+}
+
+/* set temp integer to the number of enabled servers on the proxy.
+ * Accepts exactly 1 argument. Argument is a backend, other types will lead to
+ * undefined behaviour.
+ */
+static int
+acl_fetch_connslots(struct proxy *px, struct session *l4, void *l7, unsigned int opt,
+                    const struct arg *args, struct sample *smp)
 {
 	struct server *iterator;
-	test->flags = ACL_TEST_F_VOL_TEST;
-	if (expr->arg_len) {
-		/* another proxy was designated, we must look for it */
-		for (px = proxy; px; px = px->next)
-			if ((px->cap & PR_CAP_BE) && !strcmp(px->id, expr->arg.str))
-				break;
-	}
-	if (!px)
-		return 0;
 
-	temp_pattern.data.integer = 0;
-	iterator = px->srv;
-	while (iterator) {
-		if ((iterator->state & SRV_RUNNING) == 0) {
-			iterator = iterator->next;
+	smp->flags = SMP_F_VOL_TEST;
+	smp->type = SMP_T_UINT;
+	smp->data.uint = 0;
+
+	for (iterator = args->data.prx->srv; iterator; iterator = iterator->next) {
+		if ((iterator->state & SRV_RUNNING) == 0)
 			continue;
-		}
+
 		if (iterator->maxconn == 0 || iterator->maxqueue == 0) {
 			/* configuration is stupid */
-			temp_pattern.data.integer = -1;
+			smp->data.uint = -1;  /* FIXME: stupid value! */
 			return 1;
 		}
 
-		temp_pattern.data.integer += (iterator->maxconn - iterator->cur_sess)
-		                          +  (iterator->maxqueue - iterator->nbpend);
-		iterator = iterator->next;
+		smp->data.uint += (iterator->maxconn - iterator->cur_sess)
+		                       +  (iterator->maxqueue - iterator->nbpend);
 	}
 
 	return 1;
@@ -1447,83 +1453,68 @@ acl_fetch_connslots(struct proxy *px, struct session *l4, void *l7, int dir,
 
 /* set temp integer to the id of the backend */
 static int
-acl_fetch_be_id(struct proxy *px, struct session *l4, void *l7, int dir,
-                struct acl_expr *expr, struct acl_test *test) {
-
-	test->flags = ACL_TEST_F_READ_ONLY;
-	temp_pattern.data.integer = l4->be->uuid;
-
+acl_fetch_be_id(struct proxy *px, struct session *l4, void *l7, unsigned int opt,
+                const struct arg *args, struct sample *smp)
+{
+	smp->flags = SMP_F_VOL_TXN;
+	smp->type = SMP_T_UINT;
+	smp->data.uint = l4->be->uuid;
 	return 1;
 }
 
 /* set temp integer to the id of the server */
 static int
-acl_fetch_srv_id(struct proxy *px, struct session *l4, void *l7, int dir,
-                struct acl_expr *expr, struct acl_test *test) {
-
+acl_fetch_srv_id(struct proxy *px, struct session *l4, void *l7, unsigned int opt,
+                 const struct arg *args, struct sample *smp)
+{
 	if (!target_srv(&l4->target))
 		return 0;
 
-	test->flags = ACL_TEST_F_READ_ONLY;
-	temp_pattern.data.integer = target_srv(&l4->target)->puid;
+	smp->type = SMP_T_UINT;
+	smp->data.uint = target_srv(&l4->target)->puid;
 
 	return 1;
 }
 
-/* set temp integer to the number of connections per second reaching the backend */
+/* set temp integer to the number of connections per second reaching the backend.
+ * Accepts exactly 1 argument. Argument is a backend, other types will lead to
+ * undefined behaviour.
+ */
 static int
-acl_fetch_be_sess_rate(struct proxy *px, struct session *l4, void *l7, int dir,
-                       struct acl_expr *expr, struct acl_test *test)
+acl_fetch_be_sess_rate(struct proxy *px, struct session *l4, void *l7, unsigned int opt,
+                       const struct arg *args, struct sample *smp)
 {
-	test->flags = ACL_TEST_F_VOL_TEST;
-	if (expr->arg_len) {
-		/* another proxy was designated, we must look for it */
-		for (px = proxy; px; px = px->next)
-			if ((px->cap & PR_CAP_BE) && !strcmp(px->id, expr->arg.str))
-				break;
-	}
-	if (!px)
-		return 0;
-
-	temp_pattern.data.integer = read_freq_ctr(&px->be_sess_per_sec);
+	smp->flags = SMP_F_VOL_TEST;
+	smp->type = SMP_T_UINT;
+	smp->data.uint = read_freq_ctr(&args->data.prx->be_sess_per_sec);
 	return 1;
 }
 
-/* set temp integer to the number of concurrent connections on the backend */
+/* set temp integer to the number of concurrent connections on the backend.
+ * Accepts exactly 1 argument. Argument is a backend, other types will lead to
+ * undefined behaviour.
+ */
 static int
-acl_fetch_be_conn(struct proxy *px, struct session *l4, void *l7, int dir,
-		  struct acl_expr *expr, struct acl_test *test)
+acl_fetch_be_conn(struct proxy *px, struct session *l4, void *l7, unsigned int opt,
+                  const struct arg *args, struct sample *smp)
 {
-	test->flags = ACL_TEST_F_VOL_TEST;
-	if (expr->arg_len) {
-		/* another proxy was designated, we must look for it */
-		for (px = proxy; px; px = px->next)
-			if ((px->cap & PR_CAP_BE) && !strcmp(px->id, expr->arg.str))
-				break;
-	}
-	if (!px)
-		return 0;
-
-	temp_pattern.data.integer = px->beconn;
+	smp->flags = SMP_F_VOL_TEST;
+	smp->type = SMP_T_UINT;
+	smp->data.uint = args->data.prx->beconn;
 	return 1;
 }
 
-/* set temp integer to the total number of queued connections on the backend */
+/* set temp integer to the total number of queued connections on the backend.
+ * Accepts exactly 1 argument. Argument is a backend, other types will lead to
+ * undefined behaviour.
+ */
 static int
-acl_fetch_queue_size(struct proxy *px, struct session *l4, void *l7, int dir,
-		   struct acl_expr *expr, struct acl_test *test)
+acl_fetch_queue_size(struct proxy *px, struct session *l4, void *l7, unsigned int opt,
+                     const struct arg *args, struct sample *smp)
 {
-	test->flags = ACL_TEST_F_VOL_TEST;
-	if (expr->arg_len) {
-		/* another proxy was designated, we must look for it */
-		for (px = proxy; px; px = px->next)
-			if ((px->cap & PR_CAP_BE) && !strcmp(px->id, expr->arg.str))
-				break;
-	}
-	if (!px)
-		return 0;
-
-	temp_pattern.data.integer = px->totpend;
+	smp->flags = SMP_F_VOL_TEST;
+	smp->type = SMP_T_UINT;
+	smp->data.uint = args->data.prx->totpend;
 	return 1;
 }
 
@@ -1532,22 +1523,18 @@ acl_fetch_queue_size(struct proxy *px, struct session *l4, void *l7, int dir,
  * server, we return twice the total, just as if we had half a running server.
  * This is more or less correct anyway, since we expect the last server to come
  * back soon.
+ * Accepts exactly 1 argument. Argument is a backend, other types will lead to
+ * undefined behaviour.
  */
 static int
-acl_fetch_avg_queue_size(struct proxy *px, struct session *l4, void *l7, int dir,
-		   struct acl_expr *expr, struct acl_test *test)
+acl_fetch_avg_queue_size(struct proxy *px, struct session *l4, void *l7, unsigned int opt,
+                         const struct arg *args, struct sample *smp)
 {
 	int nbsrv;
 
-	test->flags = ACL_TEST_F_VOL_TEST;
-	if (expr->arg_len) {
-		/* another proxy was designated, we must look for it */
-		for (px = proxy; px; px = px->next)
-			if ((px->cap & PR_CAP_BE) && !strcmp(px->id, expr->arg.str))
-				break;
-	}
-	if (!px)
-		return 0;
+	smp->flags = SMP_F_VOL_TEST;
+	smp->type = SMP_T_UINT;
+	px = args->data.prx;
 
 	if (px->srv_act)
 		nbsrv = px->srv_act;
@@ -1557,36 +1544,41 @@ acl_fetch_avg_queue_size(struct proxy *px, struct session *l4, void *l7, int dir
 		nbsrv = px->srv_bck;
 
 	if (nbsrv > 0)
-		temp_pattern.data.integer = (px->totpend + nbsrv - 1) / nbsrv;
+		smp->data.uint = (px->totpend + nbsrv - 1) / nbsrv;
 	else
-		temp_pattern.data.integer = px->totpend * 2;
+		smp->data.uint = px->totpend * 2;
 
 	return 1;
 }
 
-/* set temp integer to the number of concurrent connections on the server in the backend */
+/* set temp integer to the number of concurrent connections on the server in the backend.
+ * Accepts exactly 1 argument. Argument is a server, other types will lead to
+ * undefined behaviour.
+ */
 static int
-acl_fetch_srv_conn(struct proxy *px, struct session *l4, void *l7, int dir,
-		  struct acl_expr *expr, struct acl_test *test)
+acl_fetch_srv_conn(struct proxy *px, struct session *l4, void *l7, unsigned int opt,
+                   const struct arg *args, struct sample *smp)
 {
-	struct server *srv = expr->arg.srv;
-
-	temp_pattern.data.integer = srv->cur_sess;
+	smp->flags = SMP_F_VOL_TEST;
+	smp->type = SMP_T_UINT;
+	smp->data.uint = args->data.srv->cur_sess;
 	return 1;
 }
 
-/* Note: must not be declared <const> as its list will be overwritten */
+/* Note: must not be declared <const> as its list will be overwritten.
+ * Please take care of keeping this list alphabetically sorted.
+ */
 static struct acl_kw_list acl_kws = {{ },{
-	{ "nbsrv",        acl_parse_int,     acl_fetch_nbsrv,          acl_match_int,     ACL_USE_NOTHING },
-	{ "connslots",    acl_parse_int,     acl_fetch_connslots,      acl_match_int,     ACL_USE_NOTHING },
-	{ "be_id",        acl_parse_int,     acl_fetch_be_id,          acl_match_int,     ACL_USE_NOTHING },
-	{ "be_sess_rate", acl_parse_int,     acl_fetch_be_sess_rate,   acl_match_int,     ACL_USE_NOTHING },
-	{ "be_conn",      acl_parse_int,     acl_fetch_be_conn,        acl_match_int,     ACL_USE_NOTHING },
-	{ "queue",        acl_parse_int,     acl_fetch_queue_size,     acl_match_int,     ACL_USE_NOTHING },
-	{ "avg_queue",    acl_parse_int,     acl_fetch_avg_queue_size, acl_match_int,     ACL_USE_NOTHING },
-	{ "srv_is_up",    acl_parse_nothing, acl_fetch_srv_is_up,      acl_match_nothing, ACL_USE_NOTHING },
-	{ "srv_id",       acl_parse_int,     acl_fetch_srv_id,         acl_match_int,     ACL_USE_RTR_INTERNAL },
-	{ "srv_conn",     acl_parse_int,     acl_fetch_srv_conn,       acl_match_int,     ACL_USE_NOTHING },
+	{ "avg_queue",    acl_parse_int,     acl_fetch_avg_queue_size, acl_match_int,     ACL_USE_NOTHING, ARG1(1,BE) },
+	{ "be_conn",      acl_parse_int,     acl_fetch_be_conn,        acl_match_int,     ACL_USE_NOTHING, ARG1(1,BE) },
+	{ "be_id",        acl_parse_int,     acl_fetch_be_id,          acl_match_int,     ACL_USE_NOTHING, 0 },
+	{ "be_sess_rate", acl_parse_int,     acl_fetch_be_sess_rate,   acl_match_int,     ACL_USE_NOTHING, ARG1(1,BE) },
+	{ "connslots",    acl_parse_int,     acl_fetch_connslots,      acl_match_int,     ACL_USE_NOTHING, ARG1(1,BE) },
+	{ "nbsrv",        acl_parse_int,     acl_fetch_nbsrv,          acl_match_int,     ACL_USE_NOTHING, ARG1(1,BE) },
+	{ "queue",        acl_parse_int,     acl_fetch_queue_size,     acl_match_int,     ACL_USE_NOTHING, ARG1(1,BE) },
+	{ "srv_conn",     acl_parse_int,     acl_fetch_srv_conn,       acl_match_int,     ACL_USE_NOTHING, ARG1(1,SRV) },
+	{ "srv_id",       acl_parse_int,     acl_fetch_srv_id,         acl_match_int,     ACL_USE_RTR_INTERNAL, 0 },
+	{ "srv_is_up",    acl_parse_nothing, acl_fetch_srv_is_up,      acl_match_nothing, ACL_USE_NOTHING, ARG1(1,SRV) },
 	{ NULL, NULL, NULL, NULL },
 }};
 

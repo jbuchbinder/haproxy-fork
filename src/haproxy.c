@@ -222,6 +222,7 @@ void usage(char *name)
 		"        [ -p <pidfile> ] [ -m <max megs> ] [ -C <dir> ]\n"
 		"        -v displays version ; -vv shows known build options.\n"
 		"        -d enters debug mode ; -db only disables background mode.\n"
+		"        -dM[<byte>] poisons memory with <byte> (defaults to 0x50)\n"
 		"        -V enters verbose mode (disables quiet mode)\n"
 		"        -D goes daemon ; -C changes to <dir> before loading files.\n"
 		"        -q quiet mode : don't display messages\n"
@@ -451,6 +452,8 @@ void init(int argc, char **argv)
 				arg_mode |= MODE_VERBOSE;
 			else if (*flag == 'd' && flag[1] == 'b')
 				arg_mode |= MODE_FOREGROUND;
+			else if (*flag == 'd' && flag[1] == 'M')
+				mem_poison_byte = flag[2] ? strtol(flag + 2, NULL, 0) : 'P';
 			else if (*flag == 'd')
 				arg_mode |= MODE_DEBUG;
 			else if (*flag == 'c')
@@ -758,16 +761,24 @@ static void deinit_tcp_rules(struct list *rules)
 	}
 }
 
-static void deinit_pattern_arg(struct pattern_arg *p, int i)
+static void deinit_sample_arg(struct arg *p)
 {
+	struct arg *p_back = p;
+
 	if (!p)
 		return;
 
-	while (i--)
-		if (p[i].type == PATTERN_ARG_TYPE_STRING)
-			free(p[i].data.str.str);
+	while (p->type != ARGT_STOP) {
+		if (p->type == ARGT_FE || p->type == ARGT_BE ||
+		    p->type == ARGT_TAB || p->type == ARGT_SRV ||
+		    p->type == ARGT_USR || p->type == ARGT_STR) {
+			free(p->data.str.str);
+			p->data.str.str = NULL;
+		}
+		p++;
+	}
 
-	free(p);
+	free(p_back);
 }
 
 static void deinit_stick_rules(struct list *rules)
@@ -778,10 +789,10 @@ static void deinit_stick_rules(struct list *rules)
 		LIST_DEL(&rule->list);
 		deinit_acl_cond(rule->cond);
 		if (rule->expr) {
-			struct pattern_conv_expr *conv_expr, *conv_exprb;
+			struct sample_conv_expr *conv_expr, *conv_exprb;
 			list_for_each_entry_safe(conv_expr, conv_exprb, &rule->expr->conv_exprs, list)
-				deinit_pattern_arg(conv_expr->arg_p, conv_expr->arg_i);
-			deinit_pattern_arg(rule->expr->arg_p, rule->expr->arg_i);
+				deinit_sample_arg(conv_expr->arg_p);
+			deinit_sample_arg(rule->expr->arg_p);
 			free(rule->expr);
 		}
 		free(rule);
@@ -1292,14 +1303,13 @@ int main(int argc, char **argv)
 
 	/* chroot if needed */
 	if (global.chroot != NULL) {
-		if (chroot(global.chroot) == -1) {
+		if (chroot(global.chroot) == -1 || chdir("/") == -1) {
 			Alert("[%s.main()] Cannot chroot(%s).\n", argv[0], global.chroot);
 			if (nb_oldpids)
 				tell_old_pids(SIGTTIN);
 			protocol_unbind_all();
 			exit(1);
 		}
-		chdir("/");
 	}
 
 	if (nb_oldpids)

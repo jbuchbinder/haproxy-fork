@@ -31,7 +31,6 @@
 
 
 /* main event functions used to move data between sockets and buffers */
-int stream_sock_accept(int fd);
 int stream_sock_read(int fd);
 int stream_sock_write(int fd);
 void stream_sock_data_finish(struct stream_interface *si);
@@ -39,8 +38,8 @@ void stream_sock_shutr(struct stream_interface *si);
 void stream_sock_shutw(struct stream_interface *si);
 void stream_sock_chk_rcv(struct stream_interface *si);
 void stream_sock_chk_snd(struct stream_interface *si);
-void stream_sock_prepare_interface(struct stream_interface *si);
 
+extern struct sock_ops stream_sock;
 
 /* This either returns the sockname or the original destination address. Code
  * inspired from Patrick Schaaf's example of nf_getsockname() implementation.
@@ -78,8 +77,8 @@ static inline void stream_sock_get_to_addr(struct stream_interface *si)
 		return;
 	}
 #endif
-	if (si->get_dst &&
-	    si->get_dst(si->fd, (struct sockaddr *)&si->addr.to, &namelen) != -1)
+	if (si->proto->get_dst &&
+	    si->proto->get_dst(si->fd, (struct sockaddr *)&si->addr.to, &namelen) != -1)
 		si->flags |= SI_FL_TO_SET;
 	return;
 }
@@ -95,8 +94,8 @@ static inline void stream_sock_get_from_addr(struct stream_interface *si)
 		return;
 
 	namelen = sizeof(si->addr.to);
-	if (si->get_src &&
-	    si->get_src(si->fd, (struct sockaddr *)&si->addr.from, &namelen) != -1)
+	if (si->proto->get_src &&
+	    si->proto->get_src(si->fd, (struct sockaddr *)&si->addr.from, &namelen) != -1)
 		si->flags |= SI_FL_FROM_SET;
 	return;
 }

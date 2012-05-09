@@ -253,6 +253,14 @@ int str2mask(const char *str, struct in_addr *mask);
 int str2net(const char *str, struct in_addr *addr, struct in_addr *mask);
 
 /*
+ * converts <str> to two struct in6_addr* which must be pre-allocated.
+ * The format is "addr[/mask]", where "addr" cannot be empty, and mask
+ * is an optionnal number of bits (128 being the default).
+ * Returns 1 if OK, 0 if error.
+ */
+int str62net(const char *str, struct in6_addr *addr, unsigned char *mask);
+
+/*
  * Parse IP address found in url.
  */
 int url2ipv4(const char *addr, struct in_addr *dst);
@@ -667,5 +675,34 @@ char *date2str_log(char *dest, struct tm *tm, struct timeval *date, size_t size)
  * NULL if there isn't enough space.
  */
 char *gmt2str_log(char *dst, struct tm *tm, size_t size);
+
+/* Dynamically allocates a string of the proper length to hold the formatted
+ * output. NULL is returned on error. The caller is responsible for freeing the
+ * memory area using free(). The resulting string is returned in <out> if the
+ * pointer is not NULL. A previous version of <out> might be used to build the
+ * new string, and it will be freed before returning if it is not NULL, which
+ * makes it possible to build complex strings from iterative calls without
+ * having to care about freeing intermediate values, as in the example below :
+ *
+ *     memprintf(&err, "invalid argument: '%s'", arg);
+ *     ...
+ *     memprintf(&err, "parser said : <%s>\n", *err);
+ *     ...
+ *     free(*err);
+ *
+ * This means that <err> must be initialized to NULL before first invocation.
+ * The return value also holds the allocated string, which eases error checking
+ * and immediate consumption. If the output pointer is not used, NULL must be
+ * passed instead and it will be ignored.
+ *
+ * It is also convenient to use it without any free except the last one :
+ *    err = NULL;
+ *    if (!fct1(err)) report(*err);
+ *    if (!fct2(err)) report(*err);
+ *    if (!fct3(err)) report(*err);
+ *    free(*err);
+ */
+char *memprintf(char **out, const char *format, ...)
+	__attribute__ ((format(printf, 2, 3)));
 
 #endif /* _COMMON_STANDARD_H */

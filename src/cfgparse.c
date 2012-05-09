@@ -51,7 +51,6 @@
 #include <proto/lb_fwrr.h>
 #include <proto/lb_map.h>
 #include <proto/log.h>
-#include <proto/pattern.h>
 #include <proto/port_range.h>
 #include <proto/protocols.h>
 #include <proto/proto_tcp.h>
@@ -59,6 +58,7 @@
 #include <proto/proto_http.h>
 #include <proto/proxy.h>
 #include <proto/peers.h>
+#include <proto/sample.h>
 #include <proto/server.h>
 #include <proto/session.h>
 #include <proto/task.h>
@@ -454,6 +454,7 @@ static int warnif_cond_requires_req(const struct acl_cond *cond, const char *fil
 int cfg_parse_global(const char *file, int linenum, char **args, int kwm)
 {
 	int err_code = 0;
+	char *errmsg = NULL;
 
 	if (!strcmp(args[0], "global")) {  /* new section */
 		/* no option, nothing special to do */
@@ -1032,13 +1033,13 @@ int cfg_parse_global(const char *file, int linenum, char **args, int kwm)
 					/* prepare error message just in case */
 					snprintf(trash, sizeof(trash),
 						 "error near '%s' in '%s' section", args[0], "global");
-					rc = kwl->kw[index].parse(args, CFG_GLOBAL, NULL, NULL, trash, sizeof(trash));
+					rc = kwl->kw[index].parse(args, CFG_GLOBAL, NULL, NULL, &errmsg);
 					if (rc < 0) {
-						Alert("parsing [%s:%d] : %s\n", file, linenum, trash);
+						Alert("parsing [%s:%d] : %s\n", file, linenum, errmsg);
 						err_code |= ERR_ALERT | ERR_FATAL;
 					}
 					else if (rc > 0) {
-						Warning("parsing [%s:%d] : %s\n", file, linenum, trash);
+						Warning("parsing [%s:%d] : %s\n", file, linenum, errmsg);
 						err_code |= ERR_WARN;
 						goto out;
 					}
@@ -1052,6 +1053,7 @@ int cfg_parse_global(const char *file, int linenum, char **args, int kwm)
 	}
 
  out:
+	free(errmsg);
 	return err_code;
 }
 
@@ -1085,6 +1087,7 @@ static int create_cond_regex_rule(const char *file, int line,
 				  const char **cond_start)
 {
 	regex_t *preg = NULL;
+	char *errmsg = NULL;
 	const char *err;
 	int err_code = 0;
 	struct acl_cond *cond = NULL;
@@ -1106,9 +1109,9 @@ static int create_cond_regex_rule(const char *file, int line,
 
 	if (cond_start &&
 	    (strcmp(*cond_start, "if") == 0 || strcmp(*cond_start, "unless") == 0)) {
-		if ((cond = build_acl_cond(file, line, px, cond_start)) == NULL) {
-			Alert("parsing [%s:%d] : error detected while parsing a '%s' condition.\n",
-			      file, line, cmd);
+		if ((cond = build_acl_cond(file, line, px, cond_start, &errmsg)) == NULL) {
+			Alert("parsing [%s:%d] : error detected while parsing a '%s' condition : %s.\n",
+			      file, line, cmd, errmsg);
 			err_code |= ERR_ALERT | ERR_FATAL;
 			goto err;
 		}
@@ -1120,7 +1123,7 @@ static int create_cond_regex_rule(const char *file, int line,
 		goto err;
 	}
 
-	if (dir == ACL_DIR_REQ)
+	if (dir == SMP_OPT_DIR_REQ)
 		err_code |= warnif_cond_requires_resp(cond, file, line);
 	else
 		err_code |= warnif_cond_requires_req(cond, file, line);
@@ -1138,7 +1141,7 @@ static int create_cond_regex_rule(const char *file, int line,
 		goto err;
 	}
 
-	err = chain_regex((dir == ACL_DIR_REQ) ? &px->req_exp : &px->rsp_exp,
+	err = chain_regex((dir == SMP_OPT_DIR_REQ) ? &px->req_exp : &px->rsp_exp,
 			  preg, action, repl ? strdup(repl) : NULL, cond);
 	if (repl && err) {
 		Alert("parsing [%s:%d] : '%s' : invalid character or unterminated sequence in replacement string near '%c'.\n",
@@ -1147,11 +1150,13 @@ static int create_cond_regex_rule(const char *file, int line,
 		goto err;
 	}
 
-	if (dir == ACL_DIR_REQ && warnif_misplaced_reqxxx(px, file, line, cmd))
+	if (dir == SMP_OPT_DIR_REQ && warnif_misplaced_reqxxx(px, file, line, cmd))
 		err_code |= ERR_WARN;
 
+	free(errmsg);
 	return err_code;
  err:
+	free(errmsg);
 	free(preg);
 	return err_code;
 }
@@ -1264,6 +1269,15 @@ int cfg_parse_peers(const char *file, int linenum, char **args, int kwm)
 			goto out;
 		}
 		newpeer->addr = *sk;
+		newpeer->proto = protocol_by_family(newpeer->addr.ss_family);
+
+		if (!sk) {
+			Alert("parsing [%s:%d] : Unknown protocol family %d '%s'\n",
+			      file, linenum, newpeer->addr.ss_family, args[2]);
+			err_code |= ERR_ALERT | ERR_FATAL;
+			goto out;
+		}
+
 		set_host_port(&newpeer->addr, realport);
 
 		if (strcmp(newpeer->id, localpeer) == 0) {
@@ -1326,6 +1340,7 @@ int cfg_parse_listen(const char *file, int linenum, char **args, int kwm)
 	struct acl_cond *cond = NULL;
 	struct logsrv *tmplogsrv;
 	struct logformat_node *tmplf;
+	char *errmsg = NULL;
 
 	if (!strcmp(args[0], "listen"))
 		rc = PR_CAP_LISTEN;
@@ -2086,9 +2101,9 @@ int cfg_parse_listen(const char *file, int linenum, char **args, int kwm)
 			err_code |= ERR_ALERT | ERR_FATAL;
 		}
 
-		if (parse_acl((const char **)args + 1, &curproxy->acl) == NULL) {
-			Alert("parsing [%s:%d] : error detected while parsing ACL '%s'.\n",
-			      file, linenum, args[1]);
+		if (parse_acl((const char **)args + 1, &curproxy->acl, &errmsg) == NULL) {
+			Alert("parsing [%s:%d] : error detected while parsing ACL '%s' : %s.\n",
+			      file, linenum, args[1], errmsg);
 			err_code |= ERR_ALERT | ERR_FATAL;
 			goto out;
 		}
@@ -2520,9 +2535,9 @@ int cfg_parse_listen(const char *file, int linenum, char **args, int kwm)
 			goto out;
 		}
 
-		if ((cond = build_acl_cond(file, linenum, curproxy, (const char **)args + 1)) == NULL) {
-			Alert("parsing [%s:%d] : error detected while parsing blocking condition.\n",
-			      file, linenum);
+		if ((cond = build_acl_cond(file, linenum, curproxy, (const char **)args + 1, &errmsg)) == NULL) {
+			Alert("parsing [%s:%d] : error detected while parsing blocking condition : %s.\n",
+			      file, linenum, errmsg);
 			err_code |= ERR_ALERT | ERR_FATAL;
 			goto out;
 		}
@@ -2620,10 +2635,10 @@ int cfg_parse_listen(const char *file, int linenum, char **args, int kwm)
 			}
 			else if (strcmp(args[cur_arg], "if") == 0 ||
 				 strcmp(args[cur_arg], "unless") == 0) {
-				cond = build_acl_cond(file, linenum, curproxy, (const char **)args + cur_arg);
+				cond = build_acl_cond(file, linenum, curproxy, (const char **)args + cur_arg, &errmsg);
 				if (!cond) {
-					Alert("parsing [%s:%d] : '%s': error detected while parsing redirect condition.\n",
-					      file, linenum, args[0]);
+					Alert("parsing [%s:%d] : '%s': error detected while parsing redirect condition : %s.\n",
+					      file, linenum, args[0], errmsg);
 					err_code |= ERR_ALERT | ERR_FATAL;
 					goto out;
 				}
@@ -2699,9 +2714,9 @@ int cfg_parse_listen(const char *file, int linenum, char **args, int kwm)
 			goto out;
 		}
 
-		if ((cond = build_acl_cond(file, linenum, curproxy, (const char **)args + 2)) == NULL) {
-			Alert("parsing [%s:%d] : error detected while parsing switching rule.\n",
-			      file, linenum);
+		if ((cond = build_acl_cond(file, linenum, curproxy, (const char **)args + 2, &errmsg)) == NULL) {
+			Alert("parsing [%s:%d] : error detected while parsing switching rule : %s.\n",
+			      file, linenum, errmsg);
 			err_code |= ERR_ALERT | ERR_FATAL;
 			goto out;
 		}
@@ -2739,9 +2754,9 @@ int cfg_parse_listen(const char *file, int linenum, char **args, int kwm)
 			goto out;
 		}
 
-		if ((cond = build_acl_cond(file, linenum, curproxy, (const char **)args + 2)) == NULL) {
-			Alert("parsing [%s:%d] : error detected while parsing switching rule.\n",
-			      file, linenum);
+		if ((cond = build_acl_cond(file, linenum, curproxy, (const char **)args + 2, &errmsg)) == NULL) {
+			Alert("parsing [%s:%d] : error detected while parsing switching rule : %s.\n",
+			      file, linenum, errmsg);
 			err_code |= ERR_ALERT | ERR_FATAL;
 			goto out;
 		}
@@ -2775,9 +2790,9 @@ int cfg_parse_listen(const char *file, int linenum, char **args, int kwm)
 			goto out;
 		}
 
-		if ((cond = build_acl_cond(file, linenum, curproxy, (const char **)args + 1)) == NULL) {
-			Alert("parsing [%s:%d] : error detected while parsing a '%s' rule.\n",
-			      file, linenum, args[0]);
+		if ((cond = build_acl_cond(file, linenum, curproxy, (const char **)args + 1, &errmsg)) == NULL) {
+			Alert("parsing [%s:%d] : error detected while parsing a '%s' rule : %s.\n",
+			      file, linenum, args[0], errmsg);
 			err_code |= ERR_ALERT | ERR_FATAL;
 			goto out;
 		}
@@ -2951,7 +2966,7 @@ int cfg_parse_listen(const char *file, int linenum, char **args, int kwm)
 	}
 	else if (!strcmp(args[0], "stick")) {
 		struct sticking_rule *rule;
-		struct pattern_expr *expr;
+		struct sample_expr *expr;
 		int myidx = 0;
 		const char *name = NULL;
 		int flags;
@@ -2997,7 +3012,7 @@ int cfg_parse_listen(const char *file, int linenum, char **args, int kwm)
 			goto out;
 		}
 
-		expr = pattern_parse_expr(args, &myidx, trash, sizeof(trash));
+		expr = sample_parse_expr(args, &myidx, trash, sizeof(trash));
 		if (!expr) {
 			Alert("parsing [%s:%d] : '%s': %s\n", file, linenum, args[0], trash);
 			err_code |= ERR_ALERT | ERR_FATAL;
@@ -3005,7 +3020,7 @@ int cfg_parse_listen(const char *file, int linenum, char **args, int kwm)
 		}
 
 		if (flags & STK_ON_RSP) {
-			if (!(expr->fetch->dir & PATTERN_FETCH_RTR)) {
+			if (!(expr->fetch->cap & SMP_CAP_RES)) {
 				Alert("parsing [%s:%d] : '%s': fetch method '%s' can not be used on response.\n",
 				      file, linenum, args[0], expr->fetch->kw);
 		                err_code |= ERR_ALERT | ERR_FATAL;
@@ -3013,7 +3028,7 @@ int cfg_parse_listen(const char *file, int linenum, char **args, int kwm)
 			        goto out;
 			}
 		} else {
-			if (!(expr->fetch->dir & PATTERN_FETCH_REQ)) {
+			if (!(expr->fetch->cap & SMP_CAP_REQ)) {
 				Alert("parsing [%s:%d] : '%s': fetch method '%s' can not be used on request.\n",
 				      file, linenum, args[0], expr->fetch->kw);
 				err_code |= ERR_ALERT | ERR_FATAL;
@@ -3028,9 +3043,9 @@ int cfg_parse_listen(const char *file, int linenum, char **args, int kwm)
 		}
 
 		if (strcmp(args[myidx], "if") == 0 || strcmp(args[myidx], "unless") == 0) {
-			if ((cond = build_acl_cond(file, linenum, curproxy, (const char **)args + myidx)) == NULL) {
-				Alert("parsing [%s:%d] : '%s': error detected while parsing sticking condition.\n",
-				      file, linenum, args[0]);
+			if ((cond = build_acl_cond(file, linenum, curproxy, (const char **)args + myidx, &errmsg)) == NULL) {
+				Alert("parsing [%s:%d] : '%s': error detected while parsing sticking condition : %s.\n",
+				      file, linenum, args[0], errmsg);
 				err_code |= ERR_ALERT | ERR_FATAL;
 				free(expr);
 				goto out;
@@ -3089,9 +3104,9 @@ int cfg_parse_listen(const char *file, int linenum, char **args, int kwm)
 				err_code |= ERR_ALERT | ERR_FATAL;
 				goto out;
 			}
-			if ((cond = build_acl_cond(file, linenum, curproxy, (const char **)args + 2)) == NULL) {
-				Alert("parsing [%s:%d] : error detected while parsing a '%s %s' rule.\n",
-				file, linenum, args[0], args[1]);
+			if ((cond = build_acl_cond(file, linenum, curproxy, (const char **)args + 2, &errmsg)) == NULL) {
+				Alert("parsing [%s:%d] : error detected while parsing a '%s %s' rule : %s.\n",
+				      file, linenum, args[0], args[1], errmsg);
 				err_code |= ERR_ALERT | ERR_FATAL;
 				goto out;
 			}
@@ -3866,9 +3881,9 @@ stats_error_parsing:
 				goto out;
 			}
 
-			if ((cond = build_acl_cond(file, linenum, curproxy, (const char **)args + 2)) == NULL) {
-				Alert("parsing [%s:%d] : error detected while parsing a '%s %s' condition.\n",
-				      file, linenum, args[0], args[1]);
+			if ((cond = build_acl_cond(file, linenum, curproxy, (const char **)args + 2, &errmsg)) == NULL) {
+				Alert("parsing [%s:%d] : error detected while parsing a '%s %s' condition : %s.\n",
+				      file, linenum, args[0], args[1], errmsg);
 				err_code |= ERR_ALERT | ERR_FATAL;
 				goto out;
 			}
@@ -3962,9 +3977,8 @@ stats_error_parsing:
 		if (warnifnotcap(curproxy, PR_CAP_BE, file, linenum, args[0], NULL))
 			err_code |= ERR_WARN;
 
-		memcpy(trash, "error near 'balance'", 21);
-		if (backend_parse_balance((const char **)args + 1, trash, sizeof(trash), curproxy) < 0) {
-			Alert("parsing [%s:%d] : %s\n", file, linenum, trash);
+		if (backend_parse_balance((const char **)args + 1, &errmsg, curproxy) < 0) {
+			Alert("parsing [%s:%d] : %s %s\n", file, linenum, args[0], errmsg);
 			err_code |= ERR_ALERT | ERR_FATAL;
 			goto out;
 		}
@@ -4068,6 +4082,14 @@ stats_error_parsing:
 				goto out;
 			}
 			newsrv->addr = *sk;
+			newsrv->proto = protocol_by_family(newsrv->addr.ss_family);
+
+			if (!sk) {
+				Alert("parsing [%s:%d] : Unknown protocol family %d '%s'\n",
+				      file, linenum, newsrv->addr.ss_family, args[2]);
+				err_code |= ERR_ALERT | ERR_FATAL;
+				goto out;
+			}
 			set_host_port(&newsrv->addr, realport);
 
 			newsrv->check_port	= curproxy->defsrv.check_port;
@@ -4894,56 +4916,56 @@ stats_error_parsing:
 		}
 
 		err_code |= create_cond_regex_rule(file, linenum, curproxy,
-						   ACL_DIR_REQ, ACT_REPLACE, 0,
+						   SMP_OPT_DIR_REQ, ACT_REPLACE, 0,
 						   args[0], args[1], args[2], (const char **)args+3);
 		if (err_code & ERR_FATAL)
 			goto out;
 	}
 	else if (!strcmp(args[0], "reqdel")) {  /* delete request header from a regex */
 		err_code |= create_cond_regex_rule(file, linenum, curproxy,
-						   ACL_DIR_REQ, ACT_REMOVE, 0,
+						   SMP_OPT_DIR_REQ, ACT_REMOVE, 0,
 						   args[0], args[1], NULL, (const char **)args+2);
 		if (err_code & ERR_FATAL)
 			goto out;
 	}
 	else if (!strcmp(args[0], "reqdeny")) {  /* deny a request if a header matches this regex */
 		err_code |= create_cond_regex_rule(file, linenum, curproxy,
-						   ACL_DIR_REQ, ACT_DENY, 0,
+						   SMP_OPT_DIR_REQ, ACT_DENY, 0,
 						   args[0], args[1], NULL, (const char **)args+2);
 		if (err_code & ERR_FATAL)
 			goto out;
 	}
 	else if (!strcmp(args[0], "reqpass")) {  /* pass this header without allowing or denying the request */
 		err_code |= create_cond_regex_rule(file, linenum, curproxy,
-						   ACL_DIR_REQ, ACT_PASS, 0,
+						   SMP_OPT_DIR_REQ, ACT_PASS, 0,
 						   args[0], args[1], NULL, (const char **)args+2);
 		if (err_code & ERR_FATAL)
 			goto out;
 	}
 	else if (!strcmp(args[0], "reqallow")) {  /* allow a request if a header matches this regex */
 		err_code |= create_cond_regex_rule(file, linenum, curproxy,
-						   ACL_DIR_REQ, ACT_ALLOW, 0,
+						   SMP_OPT_DIR_REQ, ACT_ALLOW, 0,
 						   args[0], args[1], NULL, (const char **)args+2);
 		if (err_code & ERR_FATAL)
 			goto out;
 	}
 	else if (!strcmp(args[0], "reqtarpit")) {  /* tarpit a request if a header matches this regex */
 		err_code |= create_cond_regex_rule(file, linenum, curproxy,
-						   ACL_DIR_REQ, ACT_TARPIT, 0,
+						   SMP_OPT_DIR_REQ, ACT_TARPIT, 0,
 						   args[0], args[1], NULL, (const char **)args+2);
 		if (err_code & ERR_FATAL)
 			goto out;
 	}
 	else if (!strcmp(args[0], "reqsetbe")) { /* switch the backend from a regex, respecting case */
 		err_code |= create_cond_regex_rule(file, linenum, curproxy,
-						   ACL_DIR_REQ, ACT_SETBE, 0,
+						   SMP_OPT_DIR_REQ, ACT_SETBE, 0,
 						   args[0], args[1], args[2], (const char **)args+3);
 		if (err_code & ERR_FATAL)
 			goto out;
 	}
 	else if (!strcmp(args[0], "reqisetbe")) { /* switch the backend from a regex, ignoring case */
 		err_code |= create_cond_regex_rule(file, linenum, curproxy,
-						   ACL_DIR_REQ, ACT_SETBE, REG_ICASE,
+						   SMP_OPT_DIR_REQ, ACT_SETBE, REG_ICASE,
 						   args[0], args[1], args[2], (const char **)args+3);
 		if (err_code & ERR_FATAL)
 			goto out;
@@ -4957,42 +4979,42 @@ stats_error_parsing:
 		}
 
 		err_code |= create_cond_regex_rule(file, linenum, curproxy,
-						   ACL_DIR_REQ, ACT_REPLACE, REG_ICASE,
+						   SMP_OPT_DIR_REQ, ACT_REPLACE, REG_ICASE,
 						   args[0], args[1], args[2], (const char **)args+3);
 		if (err_code & ERR_FATAL)
 			goto out;
 	}
 	else if (!strcmp(args[0], "reqidel")) {  /* delete request header from a regex ignoring case */
 		err_code |= create_cond_regex_rule(file, linenum, curproxy,
-						   ACL_DIR_REQ, ACT_REMOVE, REG_ICASE,
+						   SMP_OPT_DIR_REQ, ACT_REMOVE, REG_ICASE,
 						   args[0], args[1], NULL, (const char **)args+2);
 		if (err_code & ERR_FATAL)
 			goto out;
 	}
 	else if (!strcmp(args[0], "reqideny")) {  /* deny a request if a header matches this regex ignoring case */
 		err_code |= create_cond_regex_rule(file, linenum, curproxy,
-						   ACL_DIR_REQ, ACT_DENY, REG_ICASE,
+						   SMP_OPT_DIR_REQ, ACT_DENY, REG_ICASE,
 						   args[0], args[1], NULL, (const char **)args+2);
 		if (err_code & ERR_FATAL)
 			goto out;
 	}
 	else if (!strcmp(args[0], "reqipass")) {  /* pass this header without allowing or denying the request */
 		err_code |= create_cond_regex_rule(file, linenum, curproxy,
-						   ACL_DIR_REQ, ACT_PASS, REG_ICASE,
+						   SMP_OPT_DIR_REQ, ACT_PASS, REG_ICASE,
 						   args[0], args[1], NULL, (const char **)args+2);
 		if (err_code & ERR_FATAL)
 			goto out;
 	}
 	else if (!strcmp(args[0], "reqiallow")) {  /* allow a request if a header matches this regex ignoring case */
 		err_code |= create_cond_regex_rule(file, linenum, curproxy,
-						   ACL_DIR_REQ, ACT_ALLOW, REG_ICASE,
+						   SMP_OPT_DIR_REQ, ACT_ALLOW, REG_ICASE,
 						   args[0], args[1], NULL, (const char **)args+2);
 		if (err_code & ERR_FATAL)
 			goto out;
 	}
 	else if (!strcmp(args[0], "reqitarpit")) {  /* tarpit a request if a header matches this regex ignoring case */
 		err_code |= create_cond_regex_rule(file, linenum, curproxy,
-						   ACL_DIR_REQ, ACT_TARPIT, REG_ICASE,
+						   SMP_OPT_DIR_REQ, ACT_TARPIT, REG_ICASE,
 						   args[0], args[1], NULL, (const char **)args+2);
 		if (err_code & ERR_FATAL)
 			goto out;
@@ -5015,9 +5037,9 @@ stats_error_parsing:
 		}
 
 		if ((strcmp(args[2], "if") == 0 || strcmp(args[2], "unless") == 0)) {
-			if ((cond = build_acl_cond(file, linenum, curproxy, (const char **)args+2)) == NULL) {
-				Alert("parsing [%s:%d] : error detected while parsing a '%s' condition.\n",
-				      file, linenum, args[0]);
+			if ((cond = build_acl_cond(file, linenum, curproxy, (const char **)args+2, &errmsg)) == NULL) {
+				Alert("parsing [%s:%d] : error detected while parsing a '%s' condition : %s.\n",
+				      file, linenum, args[0], errmsg);
 				err_code |= ERR_ALERT | ERR_FATAL;
 				goto out;
 			}
@@ -5045,21 +5067,21 @@ stats_error_parsing:
 		}
 
 		err_code |= create_cond_regex_rule(file, linenum, curproxy,
-						   ACL_DIR_RTR, ACT_REPLACE, 0,
+						   SMP_OPT_DIR_RES, ACT_REPLACE, 0,
 						   args[0], args[1], args[2], (const char **)args+3);
 		if (err_code & ERR_FATAL)
 			goto out;
 	}
 	else if (!strcmp(args[0], "rspdel")) {  /* delete response header from a regex */
 		err_code |= create_cond_regex_rule(file, linenum, curproxy,
-						   ACL_DIR_RTR, ACT_REMOVE, 0,
+						   SMP_OPT_DIR_RES, ACT_REMOVE, 0,
 						   args[0], args[1], NULL, (const char **)args+2);
 		if (err_code & ERR_FATAL)
 			goto out;
 	}
 	else if (!strcmp(args[0], "rspdeny")) {  /* block response header from a regex */
 		err_code |= create_cond_regex_rule(file, linenum, curproxy,
-						   ACL_DIR_RTR, ACT_DENY, 0,
+						   SMP_OPT_DIR_RES, ACT_DENY, 0,
 						   args[0], args[1], NULL, (const char **)args+2);
 		if (err_code & ERR_FATAL)
 			goto out;
@@ -5073,21 +5095,21 @@ stats_error_parsing:
 		}
 
 		err_code |= create_cond_regex_rule(file, linenum, curproxy,
-						   ACL_DIR_RTR, ACT_REPLACE, REG_ICASE,
+						   SMP_OPT_DIR_RES, ACT_REPLACE, REG_ICASE,
 						   args[0], args[1], args[2], (const char **)args+3);
 		if (err_code & ERR_FATAL)
 			goto out;
 	}
 	else if (!strcmp(args[0], "rspidel")) {  /* delete response header from a regex ignoring case */
 		err_code |= create_cond_regex_rule(file, linenum, curproxy,
-						   ACL_DIR_RTR, ACT_REMOVE, REG_ICASE,
+						   SMP_OPT_DIR_RES, ACT_REMOVE, REG_ICASE,
 						   args[0], args[1], NULL, (const char **)args+2);
 		if (err_code & ERR_FATAL)
 			goto out;
 	}
 	else if (!strcmp(args[0], "rspideny")) {  /* block response header from a regex ignoring case */
 		err_code |= create_cond_regex_rule(file, linenum, curproxy,
-						   ACL_DIR_RTR, ACT_DENY, REG_ICASE,
+						   SMP_OPT_DIR_RES, ACT_DENY, REG_ICASE,
 						   args[0], args[1], NULL, (const char **)args+2);
 		if (err_code & ERR_FATAL)
 			goto out;
@@ -5110,9 +5132,9 @@ stats_error_parsing:
 		}
 	
 		if ((strcmp(args[2], "if") == 0 || strcmp(args[2], "unless") == 0)) {
-			if ((cond = build_acl_cond(file, linenum, curproxy, (const char **)args+2)) == NULL) {
-				Alert("parsing [%s:%d] : error detected while parsing a '%s' condition.\n",
-				      file, linenum, args[0]);
+			if ((cond = build_acl_cond(file, linenum, curproxy, (const char **)args+2, &errmsg)) == NULL) {
+				Alert("parsing [%s:%d] : error detected while parsing a '%s' condition : %s.\n",
+				      file, linenum, args[0], errmsg);
 				err_code |= ERR_ALERT | ERR_FATAL;
 				goto out;
 			}
@@ -5241,14 +5263,14 @@ stats_error_parsing:
 					/* prepare error message just in case */
 					snprintf(trash, sizeof(trash),
 						 "error near '%s' in %s section", args[0], cursection);
-					rc = kwl->kw[index].parse(args, CFG_LISTEN, curproxy, &defproxy, trash, sizeof(trash));
+					rc = kwl->kw[index].parse(args, CFG_LISTEN, curproxy, &defproxy, &errmsg);
 					if (rc < 0) {
-						Alert("parsing [%s:%d] : %s\n", file, linenum, trash);
+						Alert("parsing [%s:%d] : %s\n", file, linenum, errmsg);
 						err_code |= ERR_ALERT | ERR_FATAL;
 						goto out;
 					}
 					else if (rc > 0) {
-						Warning("parsing [%s:%d] : %s\n", file, linenum, trash);
+						Warning("parsing [%s:%d] : %s\n", file, linenum, errmsg);
 						err_code |= ERR_WARN;
 						goto out;
 					}
@@ -5262,6 +5284,7 @@ stats_error_parsing:
 		goto out;
 	}
  out:
+	free(errmsg);
 	return err_code;
 }
 
@@ -5914,8 +5937,8 @@ int check_config_validity()
 				      curproxy->id, mrule->table.name ? mrule->table.name : curproxy->id);
 				cfgerr++;
 			}
-			else if (!stktable_compatible_pattern(mrule->expr,  target->table.type)) {
-				Alert("Proxy '%s': type of pattern not usable with type of stick-table '%s'.\n",
+			else if (!stktable_compatible_sample(mrule->expr,  target->table.type)) {
+				Alert("Proxy '%s': type of fetch not usable with type of stick-table '%s'.\n",
 				      curproxy->id, mrule->table.name ? mrule->table.name : curproxy->id);
 				cfgerr++;
 			}
@@ -5947,8 +5970,8 @@ int check_config_validity()
 				      curproxy->id, mrule->table.name ? mrule->table.name : curproxy->id);
 				cfgerr++;
 			}
-			else if (!stktable_compatible_pattern(mrule->expr, target->table.type)) {
-				Alert("Proxy '%s': type of pattern not usable with type of stick-table '%s'.\n",
+			else if (!stktable_compatible_sample(mrule->expr, target->table.type)) {
+				Alert("Proxy '%s': type of fetch not usable with type of stick-table '%s'.\n",
 				      curproxy->id, mrule->table.name ? mrule->table.name : curproxy->id);
 				cfgerr++;
 			}

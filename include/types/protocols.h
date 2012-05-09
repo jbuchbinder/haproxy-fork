@@ -134,6 +134,8 @@ struct listener {
 	} conf;				/* config information */
 };
 
+struct stream_interface;
+
 /* This structure contains all information needed to easily handle a protocol.
  * Its primary goal is to ease listeners maintenance. Specifically, the
  * bind_all() primitive must be used before any fork(), and the enable_all()
@@ -149,13 +151,15 @@ struct protocol {
 	socklen_t sock_addrlen;				/* socket address length, used by bind() */
 	int l3_addrlen;					/* layer3 address length, used by hashes */
 	int (*accept)(int fd);				/* generic accept function */
-	int (*read)(int fd);				/* generic read function */
-	int (*write)(int fd);				/* generic write function */
 	int (*bind)(struct listener *l, char *errmsg, int errlen); /* bind a listener */
 	int (*bind_all)(struct protocol *proto, char *errmsg, int errlen); /* bind all unbound listeners */
 	int (*unbind_all)(struct protocol *proto);	/* unbind all bound listeners */
 	int (*enable_all)(struct protocol *proto);	/* enable all bound listeners */
 	int (*disable_all)(struct protocol *proto);	/* disable all bound listeners */
+	int (*connect)(struct stream_interface *);      /* connect function if any */
+	int (*get_src)(int, struct sockaddr *, socklen_t *); /* syscall used to retrieve src addr */
+	int (*get_dst)(int, struct sockaddr *, socklen_t *); /* syscall used to retrieve dst addr */
+
 	struct list listeners;				/* list of listeners using this protocol */
 	int nb_listeners;				/* number of listeners */
 	struct list list;				/* list of registered protocols */

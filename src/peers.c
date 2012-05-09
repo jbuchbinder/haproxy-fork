@@ -32,7 +32,6 @@
 #include <proto/fd.h>
 #include <proto/log.h>
 #include <proto/hdr_idx.h>
-#include <proto/pattern.h>
 #include <proto/protocols.h>
 #include <proto/proto_tcp.h>
 #include <proto/proto_http.h>
@@ -232,7 +231,7 @@ switchstate:
 				si->applet.st0 = PEER_SESSION_GETVERSION;
 				/* fall through */
 			case PEER_SESSION_GETVERSION:
-				reql = buffer_get_line(si->ob, trash, sizeof(trash));
+				reql = bo_getline(si->ob, trash, sizeof(trash));
 				if (reql <= 0) { /* closed or EOL not found */
 					if (reql == 0)
 						goto out;
@@ -248,7 +247,7 @@ switchstate:
 				else
 					trash[reql-1] = 0;
 
-				buffer_skip(si->ob, reql);
+				bo_skip(si->ob, reql);
 
 				/* test version */
 				if (strcmp(PEER_SESSION_PROTO_NAME " 1.0", trash) != 0) {
@@ -263,7 +262,7 @@ switchstate:
 				si->applet.st0 = PEER_SESSION_GETHOST;
 				/* fall through */
 			case PEER_SESSION_GETHOST:
-				reql = buffer_get_line(si->ob, trash, sizeof(trash));
+				reql = bo_getline(si->ob, trash, sizeof(trash));
 				if (reql <= 0) { /* closed or EOL not found */
 					if (reql == 0)
 						goto out;
@@ -279,7 +278,7 @@ switchstate:
 				else
 					trash[reql-1] = 0;
 
-				buffer_skip(si->ob, reql);
+				bo_skip(si->ob, reql);
 
 				/* test hostname match */
 				if (strcmp(localpeer, trash) != 0) {
@@ -293,7 +292,7 @@ switchstate:
 			case PEER_SESSION_GETPEER: {
 				struct peer *curpeer;
 				char *p;
-				reql = buffer_get_line(si->ob, trash, sizeof(trash));
+				reql = bo_getline(si->ob, trash, sizeof(trash));
 				if (reql <= 0) { /* closed or EOL not found */
 					if (reql == 0)
 						goto out;
@@ -310,7 +309,7 @@ switchstate:
 				else
 					trash[reql-1] = 0;
 
-				buffer_skip(si->ob, reql);
+				bo_skip(si->ob, reql);
 
 				/* parse line "<peer name> <pid>" */
 				p = strchr(trash, ' ');
@@ -346,7 +345,7 @@ switchstate:
 				size_t key_size;
 				char *p;
 
-				reql = buffer_get_line(si->ob, trash, sizeof(trash));
+				reql = bo_getline(si->ob, trash, sizeof(trash));
 				if (reql <= 0) { /* closed or EOL not found */
 					if (reql == 0)
 						goto out;
@@ -367,7 +366,7 @@ switchstate:
 				else
 					trash[reql-1] = 0;
 
-				buffer_skip(si->ob, reql);
+				bo_skip(si->ob, reql);
 
 				/* Parse line "<table name> <type> <size>" */
 				p = strchr(trash, ' ');
@@ -448,7 +447,7 @@ switchstate:
 				struct peer_session *ps = (struct peer_session *)si->applet.private;
 
 				repl = snprintf(trash, sizeof(trash), "%d\n", PEER_SESSION_SUCCESSCODE);
-				repl = buffer_put_block(si->ib, trash, repl);
+				repl = bi_putblk(si->ib, trash, repl);
 				if (repl <= 0) {
 					if (repl == -1)
 						goto out;
@@ -512,7 +511,7 @@ switchstate:
 					goto switchstate;
 				}
 
-				repl = buffer_put_block(si->ib, trash, repl);
+				repl = bi_putblk(si->ib, trash, repl);
 				if (repl <= 0) {
 					if (repl == -1)
 						goto out;
@@ -530,7 +529,7 @@ switchstate:
 				if (si->ib->flags & BF_WRITE_PARTIAL)
 					ps->statuscode = PEER_SESSION_CONNECTEDCODE;
 
-				reql = buffer_get_line(si->ob, trash, sizeof(trash));
+				reql = bo_getline(si->ob, trash, sizeof(trash));
 				if (reql <= 0) { /* closed or EOL not found */
 					if (reql == 0)
 						goto out;
@@ -547,7 +546,7 @@ switchstate:
 				else
 					trash[reql-1] = 0;
 
-				buffer_skip(si->ob, reql);
+				bo_skip(si->ob, reql);
 
 				/* Register status code */
 				ps->statuscode = atoi(trash);
@@ -600,7 +599,7 @@ switchstate:
 				char c;
 				int totl = 0;
 
-				reql = buffer_get_block(si->ob, (char *)&c, sizeof(c), totl);
+				reql = bo_getblk(si->ob, (char *)&c, sizeof(c), totl);
 				if (reql <= 0) { /* closed or EOL not found */
 					if (reql == 0) {
 						/* nothing to read */
@@ -625,7 +624,7 @@ switchstate:
 						pushack = ps->pushack + (unsigned int)(c & 0x7F);
 					}
 					else {
-						reql = buffer_get_block(si->ob, (char *)&netinteger, sizeof(netinteger), totl);
+						reql = bo_getblk(si->ob, (char *)&netinteger, sizeof(netinteger), totl);
 						if (reql <= 0) { /* closed or EOL not found */
 							if (reql == 0) {
 								goto incomplete;
@@ -642,7 +641,7 @@ switchstate:
 						/* type string */
 						stkey.key = stkey.data.buf;
 
-						reql = buffer_get_block(si->ob, (char *)&netinteger, sizeof(netinteger), totl);
+						reql = bo_getblk(si->ob, (char *)&netinteger, sizeof(netinteger), totl);
 						if (reql <= 0) { /* closed or EOL not found */
 							if (reql == 0) {
 								goto incomplete;
@@ -653,7 +652,7 @@ switchstate:
 						totl += reql;
 						stkey.key_len = ntohl(netinteger);
 
-						reql = buffer_get_block(si->ob, stkey.key, stkey.key_len, totl);
+						reql = bo_getblk(si->ob, stkey.key, stkey.key_len, totl);
 						if (reql <= 0) { /* closed or EOL not found */
 							if (reql == 0) {
 								goto incomplete;
@@ -668,7 +667,7 @@ switchstate:
 						stkey.key_len = (size_t)-1;
 						stkey.key = &stkey.data.integer;
 
-						reql = buffer_get_block(si->ob, (char *)&netinteger, sizeof(netinteger), totl);
+						reql = bo_getblk(si->ob, (char *)&netinteger, sizeof(netinteger), totl);
 						if (reql <= 0) { /* closed or EOL not found */
 							if (reql == 0) {
 								goto incomplete;
@@ -684,7 +683,7 @@ switchstate:
 						stkey.key_len = (size_t)-1;
 						stkey.key = stkey.data.buf;
 
-						reql = buffer_get_block(si->ob, (char *)&stkey.data.buf, ps->table->table->key_size, totl);
+						reql = bo_getblk(si->ob, (char *)&stkey.data.buf, ps->table->table->key_size, totl);
 						if (reql <= 0) { /* closed or EOL not found */
 							if (reql == 0) {
 								goto incomplete;
@@ -697,7 +696,7 @@ switchstate:
 					}
 
 					/* read server id */
-					reql = buffer_get_block(si->ob, (char *)&netinteger, sizeof(netinteger), totl);
+					reql = bo_getblk(si->ob, (char *)&netinteger, sizeof(netinteger), totl);
 					if (reql <= 0) { /* closed or EOL not found */
 						if (reql == 0) {
 							goto incomplete;
@@ -806,7 +805,7 @@ switchstate:
 					/* ack message */
 					uint32_t netinteger;
 
-					reql = buffer_get_block(si->ob, (char *)&netinteger, sizeof(netinteger), totl);
+					reql = bo_getblk(si->ob, (char *)&netinteger, sizeof(netinteger), totl);
 					if (reql <= 0) { /* closed or EOL not found */
 						if (reql == 0) {
 							goto incomplete;
@@ -826,7 +825,7 @@ switchstate:
 				}
 
 				/* skip consumed message */
-				buffer_skip(si->ob, totl);
+				bo_skip(si->ob, totl);
 
 				/* loop on that state to peek next message */
 				continue;
@@ -836,7 +835,7 @@ incomplete:
 				/* Confirm finished or partial messages */
 				while (ps->confirm) {
 					/* There is a confirm messages to send */
-					repl = buffer_put_char(si->ib, 'c');
+					repl = bi_putchr(si->ib, 'c');
 					if (repl <= 0) {
 						/* no more write possible */
 						if (repl == -1)
@@ -853,7 +852,7 @@ incomplete:
 					!(ps->table->flags & SHTABLE_F_RESYNC_PROCESS)) {
 					/* Current peer was elected to request a resync */
 
-					repl = buffer_put_char(si->ib, 'R');
+					repl = bi_putchr(si->ib, 'R');
 					if (repl <= 0) {
 						/* no more write possible */
 						if (repl == -1)
@@ -872,7 +871,7 @@ incomplete:
 					netinteger = htonl(ps->pushack);
 					memcpy(&trash[1], &netinteger, sizeof(netinteger));
 
-					repl = buffer_put_block(si->ib, trash, 1+sizeof(netinteger));
+					repl = bi_putblk(si->ib, trash, 1+sizeof(netinteger));
 					if (repl <= 0) {
 						/* no more write possible */
 						if (repl == -1)
@@ -908,7 +907,7 @@ incomplete:
 							msglen = peer_prepare_datamsg(ts, ps, trash, sizeof(trash));
 							if (msglen) {
 								/* message to buffer */
-								repl = buffer_put_block(si->ib, trash, msglen);
+								repl = bi_putblk(si->ib, trash, msglen);
 								if (repl <= 0) {
 									/* no more write possible */
 									if (repl == -1)
@@ -942,7 +941,7 @@ incomplete:
 							msglen = peer_prepare_datamsg(ts, ps, trash, sizeof(trash));
 							if (msglen) {
 								/* message to buffer */
-								repl = buffer_put_block(si->ib, trash, msglen);
+								repl = bi_putblk(si->ib, trash, msglen);
 								if (repl <= 0) {
 									/* no more write possible */
 									if (repl == -1)
@@ -958,7 +957,7 @@ incomplete:
 
 					if (!(ps->flags & PEER_F_TEACH_FINISHED)) {
 						/* process final lesson message */
-						repl = buffer_put_char(si->ib, ((ps->table->flags & SHTABLE_RESYNC_STATEMASK) == SHTABLE_RESYNC_FINISHED) ? 'F' : 'C');
+						repl = bi_putchr(si->ib, ((ps->table->flags & SHTABLE_RESYNC_STATEMASK) == SHTABLE_RESYNC_FINISHED) ? 'F' : 'C');
 						if (repl <= 0) {
 							/* no more write possible */
 							if (repl == -1)
@@ -1000,7 +999,7 @@ incomplete:
 						msglen = peer_prepare_datamsg(ts, ps, trash, sizeof(trash));
 						if (msglen) {
 							/* message to buffer */
-							repl = buffer_put_block(si->ib, trash, msglen);
+							repl = bi_putblk(si->ib, trash, msglen);
 							if (repl <= 0) {
 								/* no more write possible */
 								if (repl == -1)
@@ -1019,20 +1018,20 @@ incomplete:
 			case PEER_SESSION_EXIT:
 				repl = snprintf(trash, sizeof(trash), "%d\n", si->applet.st1);
 
-				if (buffer_put_block(si->ib, trash, repl) == -1)
+				if (bi_putblk(si->ib, trash, repl) == -1)
 					goto out;
 				si->applet.st0 = PEER_SESSION_END;
 				/* fall through */
 			case PEER_SESSION_END: {
-				si->shutw(si);
-				si->shutr(si);
+				si->sock.shutw(si);
+				si->sock.shutr(si);
 				si->ib->flags |= BF_READ_NULL;
 				goto quit;
 			}
 		}
 	}
 out:
-	si->update(si);
+	si->sock.update(si);
 	si->ob->flags |= BF_READ_DONTWAIT;
 	/* we don't want to expire timeouts while we're processing requests */
 	si->ib->rex = TICK_ETERNITY;
@@ -1155,9 +1154,9 @@ static struct session *peer_session_create(struct peer *peer, struct peer_sessio
 	s->si[0].state = s->si[0].prev_state = SI_ST_EST;
 	s->si[0].err_type = SI_ET_NONE;
 	s->si[0].err_loc = NULL;
-	s->si[0].connect   = NULL;
-	s->si[0].get_src   = NULL;
-	s->si[0].get_dst   = NULL;
+	s->si[0].proto   = NULL;
+	s->si[0].release = NULL;
+	s->si[0].send_proxy_ofs = 0;
 	clear_target(&s->si[0].target);
 	s->si[0].exp = TICK_ETERNITY;
 	s->si[0].flags = SI_FL_NONE;
@@ -1174,17 +1173,16 @@ static struct session *peer_session_create(struct peer *peer, struct peer_sessio
 	s->si[1].conn_retries = p->conn_retries;
 	s->si[1].err_type = SI_ET_NONE;
 	s->si[1].err_loc = NULL;
-	s->si[1].connect = tcp_connect_server;
-	s->si[1].get_src = getsockname;
-	s->si[1].get_dst = getpeername;
+	s->si[1].proto = peer->proto;
+	s->si[1].release = NULL;
+	s->si[1].send_proxy_ofs = 0;
 	set_target_proxy(&s->si[1].target, s->be);
 	s->si[1].exp = TICK_ETERNITY;
 	s->si[1].flags = SI_FL_NONE;
 	if (s->be->options2 & PR_O2_INDEPSTR)
 		s->si[1].flags |= SI_FL_INDEP_STR;
 
-	stream_sock_prepare_interface(&s->si[1]);
-	s->si[1].release = NULL;
+	stream_interface_prepare(&s->si[1], &stream_sock);
 
 	session_init_srv_conn(s);
 	set_target_proxy(&s->target, s->be);
@@ -1206,6 +1204,7 @@ static struct session *peer_session_create(struct peer *peer, struct peer_sessio
 	s->srv_error = default_srv_error;
 
 	s->uniq_id = 0;
+	s->unique_id = NULL;
 
 	txn = &s->txn;
 	/* Those variables will be checked and freed if non-NULL in

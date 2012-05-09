@@ -71,7 +71,7 @@ int http_process_req_common(struct session *s, struct buffer *req, int an_bit, s
 int http_process_request(struct session *t, struct buffer *req, int an_bit);
 int http_process_tarpit(struct session *s, struct buffer *req, int an_bit);
 int http_process_request_body(struct session *s, struct buffer *req, int an_bit);
-int http_send_name_header(struct http_txn *txn, struct http_msg *msg, struct buffer *buf, struct proxy* be, const char* svr_name);
+int http_send_name_header(struct http_txn *txn, struct proxy* be, const char* svr_name);
 int http_wait_for_response(struct session *s, struct buffer *rep, int an_bit);
 int http_process_res_common(struct session *t, struct buffer *rep, int an_bit, struct proxy *px);
 int http_request_forward_body(struct session *s, struct buffer *req, int an_bit);
@@ -96,9 +96,9 @@ void http_sess_log(struct session *s);
 void perform_http_redirect(struct session *s, struct stream_interface *si);
 void http_return_srv_error(struct session *s, struct stream_interface *si);
 void http_capture_bad_message(struct error_snapshot *es, struct session *s,
-                              struct buffer *buf, struct http_msg *msg,
+                              struct http_msg *msg,
 			      int state, struct proxy *other_end);
-unsigned int http_get_hdr(struct http_msg *msg, const char *hname, int hlen,
+unsigned int http_get_hdr(const struct http_msg *msg, const char *hname, int hlen,
 			  struct hdr_idx *idx, int occ,
 			  struct hdr_ctx *ctx, char **vptr, int *vlen);
 
@@ -113,7 +113,7 @@ struct chunk *error_message(struct session *s, int msgnum);
 /* to be used when contents change in an HTTP message */
 #define http_msg_move_end(msg, bytes) do { \
 		unsigned int _bytes = (bytes);	\
-		(msg)->col += (_bytes);		\
+		(msg)->next += (_bytes);	\
 		(msg)->sov += (_bytes);		\
 		(msg)->eoh += (_bytes);		\
 	} while (0)

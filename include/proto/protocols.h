@@ -99,6 +99,12 @@ int unbind_all_listeners(struct protocol *proto);
  */
 void delete_listener(struct listener *listener);
 
+/* This function is called on a read event from a listening socket, corresponding
+ * to an accept. It tries to accept as many connections as possible, and for each
+ * calls the listener's accept handler (generally the frontend's accept handler).
+ */
+int listener_accept(int fd);
+
 /* Registers the protocol <proto> */
 void protocol_register(struct protocol *proto);
 
@@ -125,6 +131,8 @@ int protocol_unbind_all(void);
  */
 int protocol_enable_all(void);
 
+/* returns the protocol associated to family <family> or NULL if not found */
+struct protocol *protocol_by_family(int family);
 
 #endif /* _PROTO_PROTOCOLS_H */
 

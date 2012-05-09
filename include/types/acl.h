@@ -2,7 +2,7 @@
  * include/types/acl.h
  * This file provides structures and types for ACLs.
  *
- * Copyright (C) 2000-2010 Willy Tarreau - w@1wt.eu
+ * Copyright (C) 2000-2012 Willy Tarreau - w@1wt.eu
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -26,8 +26,10 @@
 #include <common/config.h>
 #include <common/mini-clist.h>
 
+#include <types/arg.h>
 #include <types/auth.h>
 #include <types/proxy.h>
+#include <types/sample.h>
 #include <types/server.h>
 #include <types/session.h>
 
@@ -67,35 +69,6 @@ enum {
 	ACL_COND_NONE,		/* no polarity set yet */
 	ACL_COND_IF,		/* positive condition (after 'if') */
 	ACL_COND_UNLESS,	/* negative condition (after 'unless') */
-};
-
-/* possible flags for intermediate test values. The flags are maintained
- * across consecutive fetches for a same entry (eg: parse all req lines).
- */
-enum {
-	ACL_TEST_F_READ_ONLY  = 1 << 0, /* test data are read-only */
-	ACL_TEST_F_MUST_FREE  = 1 << 1, /* test data must be freed after end of evaluation */
-	ACL_TEST_F_VOL_TEST   = 1 << 2, /* result must not survive longer than the test (eg: time) */
-	ACL_TEST_F_VOL_HDR    = 1 << 3, /* result sensitive to changes in headers */
-	ACL_TEST_F_VOL_1ST    = 1 << 4, /* result sensitive to changes in first line (eg: URI) */
-	ACL_TEST_F_VOL_TXN    = 1 << 5, /* result sensitive to new transaction (eg: persist) */
-	ACL_TEST_F_VOL_SESS   = 1 << 6, /* result sensitive to new session (eg: IP) */
-	ACL_TEST_F_VOLATILE   = (1<<2)|(1<<3)|(1<<4)|(1<<5)|(1<<6),
-	ACL_TEST_F_FETCH_MORE = 1 << 7, /* if test does not match, retry with next entry (for multi-match) */
-	ACL_TEST_F_MAY_CHANGE = 1 << 8, /* if test does not match, retry later (eg: request size) */
-	ACL_TEST_F_RES_SET    = 1 << 9, /* for fetch() function to assign the result without calling match() */
-	ACL_TEST_F_RES_PASS   = 1 << 10,/* with SET_RESULT, sets result to PASS (defaults to FAIL) */
-	ACL_TEST_F_SET_RES_PASS = (ACL_TEST_F_RES_SET|ACL_TEST_F_RES_PASS),  /* sets result to PASS */
-	ACL_TEST_F_SET_RES_FAIL = (ACL_TEST_F_RES_SET),                      /* sets result to FAIL */
-	ACL_TEST_F_NULL_MATCH = 1 << 11,/* call expr->kw->match with NULL pattern if expr->patterns is empty */
-};
-
-/* ACLs can be evaluated on requests and on responses, and on partial or complete data */
-enum {
-	ACL_DIR_REQ = 0,        /* ACL evaluated on request */
-	ACL_DIR_RTR = (1 << 0), /* ACL evaluated on response */
-	ACL_DIR_MASK = (ACL_DIR_REQ | ACL_DIR_RTR),
-	ACL_PARTIAL = (1 << 1), /* partial data, return MISS if data are missing */
 };
 
 /* possible flags for expressions or patterns */
@@ -208,9 +181,16 @@ struct acl_time {
 	int h2:5, m2:6;         /* 0..24:0..60. Use 24:0 for all day. */
 };
 
-/* The acl will be linked to from the proxy where it is declared */
+/* This describes one ACL pattern, which might be a single value or a tree of
+ * values. All patterns for a single ACL expression are linked together. Some
+ * of them might have a type (eg: IP). Right now, the types are shared with
+ * the samples, though it is possible that in the future this will change to
+ * accommodate for other types (eg: meth, regex). Unsigned and constant types
+ * are preferred when there is a doubt.
+ */
 struct acl_pattern {
 	struct list list;                       /* chaining */
+	int type;                               /* type of the ACL pattern (SMP_T_*) */
 	union {
 		int i;                          /* integer value */
 		struct {
@@ -222,6 +202,10 @@ struct acl_pattern {
 			struct in_addr addr;
 			struct in_addr mask;
 		} ipv4;                         /* IPv4 address */
+		struct {
+			struct in6_addr addr;
+			unsigned char mask;     /* number of bits */
+		} ipv6;                         /* IPv6 address/mask */
 		struct acl_time time;           /* valid hours and days */
 		unsigned int group_mask;
 		struct eb_root *tree;           /* tree storing all values if any */
@@ -236,29 +220,13 @@ struct acl_pattern {
 	int flags;                      /* expr or pattern flags. */
 };
 
-/* The structure exchanged between an acl_fetch_* function responsible for
- * retrieving a value, and an acl_match_* function responsible for testing it.
- */
-struct acl_test {
-	int flags;              /* ACL_TEST_F_* set to 0 on first call */
-	union {                 /* fetch_* functions context for any purpose */
-		void *p;        /* any pointer */
-		int i;          /* any integer */
-		long long ll;   /* any long long or smaller */
-		double d;       /* any float or double */
-		void *a[8];     /* any array of up to 8 pointers */
-	} ctx;
-};
-
-
-/*
- * ACL keyword: Associates keywords with parsers, methods to retrieve the value and testers.
- */
-
 /* some dummy declarations to silent the compiler */
 struct proxy;
 struct session;
 
+/*
+ * ACL keyword: Associates keywords with parsers, methods to retrieve the value and testers.
+ */
 /*
  * NOTE:
  * The 'parse' function is called to parse words in the configuration. It must
@@ -271,11 +239,14 @@ struct session;
 struct acl_expr;
 struct acl_keyword {
 	const char *kw;
-	int (*parse)(const char **text, struct acl_pattern *pattern, int *opaque);
-	int (*fetch)(struct proxy *px, struct session *l4, void *l7, int dir,
-	             struct acl_expr *expr, struct acl_test *test);
-	int (*match)(struct acl_test *test, struct acl_pattern *pattern);
+	int (*parse)(const char **text, struct acl_pattern *pattern, int *opaque, char **err);
+	int (*fetch)(struct proxy *px, struct session *l4, void *l7, unsigned int opt,
+	             const struct arg *args, struct sample *smp);
+	int (*match)(struct sample *smp, struct acl_pattern *pattern);
 	unsigned int requires;   /* bit mask of all ACL_USE_* required to evaluate this keyword */
+	int arg_mask; /* mask describing up to 7 arg types */
+	int (*val_args)(struct arg *arg_p, char **err_msg);  /* argument validation function */
+	/* must be after the config params */
 	int use_cnt;
 };
 
@@ -302,16 +273,12 @@ struct acl_kw_list {
 struct acl_expr {
 	struct list list;           /* chaining */
 	struct acl_keyword *kw;     /* back-reference to the keyword */
-	union {                     /* optional argument of the subject (eg: header or cookie name) */
-		char *str;
-		struct userlist *ul;
-		struct server *srv; /* must be initialised by acl_find_targets */
-	} arg;
-	int arg_len;                /* optional argument length */
+	struct arg *args;           /* optional argument list (eg: header or cookie name) */
 	struct list patterns;       /* list of acl_patterns */
 	struct eb_root pattern_tree;  /* may be used for lookup in large datasets */
 };
 
+/* The acl will be linked to from the proxy where it is declared */
 struct acl {
 	struct list list;           /* chaining */
 	char *name;		    /* acl name */

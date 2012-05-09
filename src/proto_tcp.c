@@ -38,14 +38,15 @@
 #include <types/server.h>
 
 #include <proto/acl.h>
+#include <proto/arg.h>
 #include <proto/buffers.h>
 #include <proto/frontend.h>
 #include <proto/log.h>
-#include <proto/pattern.h>
 #include <proto/port_range.h>
 #include <proto/protocols.h>
 #include <proto/proto_tcp.h>
 #include <proto/proxy.h>
+#include <proto/sample.h>
 #include <proto/session.h>
 #include <proto/stick_table.h>
 #include <proto/stream_sock.h>
@@ -68,9 +69,8 @@ static struct protocol proto_tcpv4 = {
 	.sock_family = AF_INET,
 	.sock_addrlen = sizeof(struct sockaddr_in),
 	.l3_addrlen = 32/8,
-	.accept = &stream_sock_accept,
-	.read = &stream_sock_read,
-	.write = &stream_sock_write,
+	.accept = &listener_accept,
+	.connect = tcp_connect_server,
 	.bind = tcp_bind_listener,
 	.bind_all = tcp_bind_listeners,
 	.unbind_all = unbind_all_listeners,
@@ -88,9 +88,8 @@ static struct protocol proto_tcpv6 = {
 	.sock_family = AF_INET6,
 	.sock_addrlen = sizeof(struct sockaddr_in6),
 	.l3_addrlen = 128/8,
-	.accept = &stream_sock_accept,
-	.read = &stream_sock_read,
-	.write = &stream_sock_write,
+	.accept = &listener_accept,
+	.connect = tcp_connect_server,
 	.bind = tcp_bind_listener,
 	.bind_all = tcp_bind_listeners,
 	.unbind_all = unbind_all_listeners,
@@ -393,7 +392,7 @@ int tcp_connect_server(struct stream_interface *si)
 	 * machine with the first ACK. We only do this if there are pending
 	 * data in the buffer.
 	 */
-	if ((be->options2 & PR_O2_SMARTCON) && si->ob->send_max)
+	if ((be->options2 & PR_O2_SMARTCON) && si->ob->o)
                 setsockopt(fd, IPPROTO_TCP, TCP_QUICKACK, &zero, sizeof(zero));
 #endif
 
@@ -445,9 +444,9 @@ int tcp_connect_server(struct stream_interface *si)
 	fdtab[fd].owner = si;
 	fdtab[fd].state = FD_STCONN; /* connection in progress */
 	fdtab[fd].flags = FD_FL_TCP | FD_FL_TCP_NODELAY;
-	fdtab[fd].cb[DIR_RD].f = &stream_sock_read;
+	fdtab[fd].cb[DIR_RD].f = si->sock.read;
 	fdtab[fd].cb[DIR_RD].b = si->ib;
-	fdtab[fd].cb[DIR_WR].f = &stream_sock_write;
+	fdtab[fd].cb[DIR_WR].f = si->sock.write;
 	fdtab[fd].cb[DIR_WR].b = si->ob;
 
 	fdinfo[fd].peeraddr = (struct sockaddr *)&si->addr.to;
@@ -669,13 +668,13 @@ int tcp_inspect_request(struct session *s, struct buffer *req, int an_bit)
 	struct stktable *t;
 	int partial;
 
-	DPRINTF(stderr,"[%u] %s: session=%p b=%p, exp(r,w)=%u,%u bf=%08x bl=%d analysers=%02x\n",
+	DPRINTF(stderr,"[%u] %s: session=%p b=%p, exp(r,w)=%u,%u bf=%08x bh=%d analysers=%02x\n",
 		now_ms, __FUNCTION__,
 		s,
 		req,
 		req->rex, req->wex,
 		req->flags,
-		req->l,
+		req->i,
 		req->analysers);
 
 	/* We don't know whether we have enough data, so must proceed
@@ -689,15 +688,15 @@ int tcp_inspect_request(struct session *s, struct buffer *req, int an_bit)
 	 */
 
 	if (req->flags & (BF_SHUTR|BF_FULL) || !s->be->tcp_req.inspect_delay || tick_is_expired(req->analyse_exp, now_ms))
-		partial = 0;
+		partial = SMP_OPT_FINAL;
 	else
-		partial = ACL_PARTIAL;
+		partial = 0;
 
 	list_for_each_entry(rule, &s->be->tcp_req.inspect_rules, list) {
 		int ret = ACL_PAT_PASS;
 
 		if (rule->cond) {
-			ret = acl_exec_cond(rule->cond, s->be, s, &s->txn, ACL_DIR_REQ | partial);
+			ret = acl_exec_cond(rule->cond, s->be, s, &s->txn, SMP_OPT_DIR_REQ | partial);
 			if (ret == ACL_PAT_MISS) {
 				buffer_dont_connect(req);
 				/* just set the request timeout once at the beginning of the request */
@@ -787,13 +786,13 @@ int tcp_inspect_response(struct session *s, struct buffer *rep, int an_bit)
 	struct tcp_rule *rule;
 	int partial;
 
-	DPRINTF(stderr,"[%u] %s: session=%p b=%p, exp(r,w)=%u,%u bf=%08x bl=%d analysers=%02x\n",
+	DPRINTF(stderr,"[%u] %s: session=%p b=%p, exp(r,w)=%u,%u bf=%08x bh=%d analysers=%02x\n",
 		now_ms, __FUNCTION__,
 		s,
 		rep,
 		rep->rex, rep->wex,
 		rep->flags,
-		rep->l,
+		rep->i,
 		rep->analysers);
 
 	/* We don't know whether we have enough data, so must proceed
@@ -807,15 +806,15 @@ int tcp_inspect_response(struct session *s, struct buffer *rep, int an_bit)
 	 */
 
 	if (rep->flags & BF_SHUTR || tick_is_expired(rep->analyse_exp, now_ms))
-		partial = 0;
+		partial = SMP_OPT_FINAL;
 	else
-		partial = ACL_PARTIAL;
+		partial = 0;
 
 	list_for_each_entry(rule, &s->be->tcp_rep.inspect_rules, list) {
 		int ret = ACL_PAT_PASS;
 
 		if (rule->cond) {
-			ret = acl_exec_cond(rule->cond, s->be, s, &s->txn, ACL_DIR_RTR | partial);
+			ret = acl_exec_cond(rule->cond, s->be, s, &s->txn, SMP_OPT_DIR_RES | partial);
 			if (ret == ACL_PAT_MISS) {
 				/* just set the analyser timeout once at the beginning of the response */
 				if (!tick_isset(rep->analyse_exp) && s->be->tcp_rep.inspect_delay)
@@ -879,7 +878,7 @@ int tcp_exec_req_rules(struct session *s)
 		ret = ACL_PAT_PASS;
 
 		if (rule->cond) {
-			ret = acl_exec_cond(rule->cond, s->fe, s, NULL, ACL_DIR_REQ);
+			ret = acl_exec_cond(rule->cond, s->fe, s, NULL, SMP_OPT_DIR_REQ|SMP_OPT_FINAL);
 			ret = acl_pass(ret);
 			if (rule->cond->pol == ACL_COND_UNLESS)
 				ret = !ret;
@@ -937,11 +936,11 @@ int tcp_exec_req_rules(struct session *s)
 /* Parse a tcp-response rule. Return a negative value in case of failure */
 static int tcp_parse_response_rule(char **args, int arg, int section_type,
 				  struct proxy *curpx, struct proxy *defpx,
-				  struct tcp_rule *rule, char *err, int errlen)
+				  struct tcp_rule *rule, char **err)
 {
 	if (curpx == defpx || !(curpx->cap & PR_CAP_BE)) {
-		snprintf(err, errlen, "%s %s is only allowed in 'backend' sections",
-			 args[0], args[1]);
+		memprintf(err, "%s %s is only allowed in 'backend' sections",
+		          args[0], args[1]);
 		return -1;
 	}
 
@@ -954,23 +953,23 @@ static int tcp_parse_response_rule(char **args, int arg, int section_type,
 		rule->action = TCP_ACT_REJECT;
 	}
 	else {
-		snprintf(err, errlen,
-			 "'%s %s' expects 'accept' or 'reject' in %s '%s' (was '%s')",
-			 args[0], args[1], proxy_type_str(curpx), curpx->id, args[arg]);
+		memprintf(err,
+		          "'%s %s' expects 'accept' or 'reject' in %s '%s' (got '%s')",
+		          args[0], args[1], proxy_type_str(curpx), curpx->id, args[arg]);
 		return -1;
 	}
 
 	if (strcmp(args[arg], "if") == 0 || strcmp(args[arg], "unless") == 0) {
-		if ((rule->cond = build_acl_cond(NULL, 0, curpx, (const char **)args+arg)) == NULL) {
-			snprintf(err, errlen,
-				 "error detected in %s '%s' while parsing '%s' condition",
-				 proxy_type_str(curpx), curpx->id, args[arg]);
+		if ((rule->cond = build_acl_cond(NULL, 0, curpx, (const char **)args+arg, err)) == NULL) {
+			memprintf(err,
+			          "'%s %s %s' : error detected in %s '%s' while parsing '%s' condition : %s",
+			          args[0], args[1], args[2], proxy_type_str(curpx), curpx->id, args[arg], *err);
 			return -1;
 		}
 	}
 	else if (*args[arg]) {
-		snprintf(err, errlen,
-			 "'%s %s %s' only accepts 'if' or 'unless', in %s '%s' (was '%s')",
+		memprintf(err,
+			 "'%s %s %s' only accepts 'if' or 'unless', in %s '%s' (got '%s')",
 			 args[0], args[1], args[2], proxy_type_str(curpx), curpx->id, args[arg]);
 		return -1;
 	}
@@ -982,11 +981,11 @@ static int tcp_parse_response_rule(char **args, int arg, int section_type,
 /* Parse a tcp-request rule. Return a negative value in case of failure */
 static int tcp_parse_request_rule(char **args, int arg, int section_type,
 				  struct proxy *curpx, struct proxy *defpx,
-				  struct tcp_rule *rule, char *err, int errlen)
+				  struct tcp_rule *rule, char **err)
 {
 	if (curpx == defpx) {
-		snprintf(err, errlen, "%s %s is not allowed in 'defaults' sections",
-			 args[0], args[1]);
+		memprintf(err, "%s %s is not allowed in 'defaults' sections",
+		          args[0], args[1]);
 		return -1;
 	}
 
@@ -1000,47 +999,55 @@ static int tcp_parse_request_rule(char **args, int arg, int section_type,
 	}
 	else if (strcmp(args[arg], "track-sc1") == 0) {
 		int ret;
+		int kw = arg;
 
 		arg++;
 		ret = parse_track_counters(args, &arg, section_type, curpx,
-					   &rule->act_prm.trk_ctr, defpx, err, errlen);
+					   &rule->act_prm.trk_ctr, defpx, err);
 
-		if (ret < 0) /* nb: warnings are not handled yet */
-			return -1;
-
+		if (ret < 0) { /* nb: warnings are not handled yet */
+			memprintf(err,
+			          "'%s %s %s' : %s in %s '%s'",
+			          args[0], args[1], args[kw], *err, proxy_type_str(curpx), curpx->id);
+			return ret;
+		}
 		rule->action = TCP_ACT_TRK_SC1;
 	}
 	else if (strcmp(args[arg], "track-sc2") == 0) {
 		int ret;
+		int kw = arg;
 
 		arg++;
 		ret = parse_track_counters(args, &arg, section_type, curpx,
-					   &rule->act_prm.trk_ctr, defpx, err, errlen);
+					   &rule->act_prm.trk_ctr, defpx, err);
 
-		if (ret < 0) /* nb: warnings are not handled yet */
-			return -1;
-
+		if (ret < 0) { /* nb: warnings are not handled yet */
+			memprintf(err,
+			          "'%s %s %s' : %s in %s '%s'",
+			          args[0], args[1], args[kw], *err, proxy_type_str(curpx), curpx->id);
+			return ret;
+		}
 		rule->action = TCP_ACT_TRK_SC2;
 	}
 	else {
-		snprintf(err, errlen,
-			 "'%s %s' expects 'accept', 'reject', 'track-sc1' "
-			 "or 'track-sc2' in %s '%s' (was '%s')",
-			 args[0], args[1], proxy_type_str(curpx), curpx->id, args[arg]);
+		memprintf(err,
+		          "'%s %s' expects 'accept', 'reject', 'track-sc1' "
+		          "or 'track-sc2' in %s '%s' (got '%s')",
+		          args[0], args[1], proxy_type_str(curpx), curpx->id, args[arg]);
 		return -1;
 	}
 
 	if (strcmp(args[arg], "if") == 0 || strcmp(args[arg], "unless") == 0) {
-		if ((rule->cond = build_acl_cond(NULL, 0, curpx, (const char **)args+arg)) == NULL) {
-			snprintf(err, errlen,
-				 "error detected in %s '%s' while parsing '%s' condition",
-				 proxy_type_str(curpx), curpx->id, args[arg]);
+		if ((rule->cond = build_acl_cond(NULL, 0, curpx, (const char **)args+arg, err)) == NULL) {
+			memprintf(err,
+			          "'%s %s %s' : error detected in %s '%s' while parsing '%s' condition : %s",
+			          args[0], args[1], args[2], proxy_type_str(curpx), curpx->id, args[arg], *err);
 			return -1;
 		}
 	}
 	else if (*args[arg]) {
-		snprintf(err, errlen,
-			 "'%s %s %s' only accepts 'if' or 'unless', in %s '%s' (was '%s')",
+		memprintf(err,
+			 "'%s %s %s' only accepts 'if' or 'unless', in %s '%s' (got '%s')",
 			 args[0], args[1], args[2], proxy_type_str(curpx), curpx->id, args[arg]);
 		return -1;
 	}
@@ -1051,41 +1058,39 @@ static int tcp_parse_request_rule(char **args, int arg, int section_type,
  * keyword.
  */
 static int tcp_parse_tcp_rep(char **args, int section_type, struct proxy *curpx,
-			     struct proxy *defpx, char *err, int errlen)
+                             struct proxy *defpx, char **err)
 {
 	const char *ptr = NULL;
 	unsigned int val;
-	int retlen;
 	int warn = 0;
 	int arg;
 	struct tcp_rule *rule;
 
 	if (!*args[1]) {
-		snprintf(err, errlen, "missing argument for '%s' in %s '%s'",
-			 args[0], proxy_type_str(curpx), curpx->id);
+		memprintf(err, "missing argument for '%s' in %s '%s'",
+		          args[0], proxy_type_str(curpx), curpx->id);
 		return -1;
 	}
 
 	if (strcmp(args[1], "inspect-delay") == 0) {
 		if (curpx == defpx || !(curpx->cap & PR_CAP_BE)) {
-			snprintf(err, errlen, "%s %s is only allowed in 'backend' sections",
-				 args[0], args[1]);
+			memprintf(err, "%s %s is only allowed in 'backend' sections",
+			          args[0], args[1]);
 			return -1;
 		}
 
 		if (!*args[2] || (ptr = parse_time_err(args[2], &val, TIME_UNIT_MS))) {
-			retlen = snprintf(err, errlen,
-					  "'%s %s' expects a positive delay in milliseconds, in %s '%s'",
-					  args[0], args[1], proxy_type_str(curpx), curpx->id);
-			if (ptr && retlen < errlen)
-				retlen += snprintf(err + retlen, errlen - retlen,
-						   " (unexpected character '%c')", *ptr);
+			memprintf(err,
+			          "'%s %s' expects a positive delay in milliseconds, in %s '%s'",
+			          args[0], args[1], proxy_type_str(curpx), curpx->id);
+			if (ptr)
+				memprintf(err, "%s (unexpected character '%c')", *err, *ptr);
 			return -1;
 		}
 
 		if (curpx->tcp_rep.inspect_delay) {
-			snprintf(err, errlen, "ignoring %s %s (was already defined) in %s '%s'",
-				 args[0], args[1], proxy_type_str(curpx), curpx->id);
+			memprintf(err, "ignoring %s %s (was already defined) in %s '%s'",
+			          args[0], args[1], proxy_type_str(curpx), curpx->id);
 			return 1;
 		}
 		curpx->tcp_rep.inspect_delay = val;
@@ -1098,7 +1103,7 @@ static int tcp_parse_tcp_rep(char **args, int section_type, struct proxy *curpx,
 
 	if (strcmp(args[1], "content") == 0) {
 		arg++;
-		if (tcp_parse_response_rule(args, arg, section_type, curpx, defpx, rule, err, errlen) < 0)
+		if (tcp_parse_response_rule(args, arg, section_type, curpx, defpx, rule, err) < 0)
 			goto error;
 
 		if (rule->cond && (rule->cond->requires & ACL_USE_L6REQ_VOLATILE)) {
@@ -1108,18 +1113,18 @@ static int tcp_parse_tcp_rep(char **args, int section_type, struct proxy *curpx,
 			acl = cond_find_require(rule->cond, ACL_USE_L6REQ_VOLATILE);
 			name = acl ? acl->name : "(unknown)";
 
-			retlen = snprintf(err, errlen,
-					  "acl '%s' involves some request-only criteria which will be ignored.",
-					  name);
+			memprintf(err,
+			          "acl '%s' involves some request-only criteria which will be ignored in '%s %s'",
+			          name, args[0], args[1]);
 			warn++;
 		}
 
 		LIST_ADDQ(&curpx->tcp_rep.inspect_rules, &rule->list);
 	}
 	else {
-		retlen = snprintf(err, errlen,
-				  "'%s' expects 'inspect-delay' or 'content' in %s '%s' (was '%s')",
-				  args[0], proxy_type_str(curpx), curpx->id, args[1]);
+		memprintf(err,
+		          "'%s' expects 'inspect-delay' or 'content' in %s '%s' (got '%s')",
+		          args[0], proxy_type_str(curpx), curpx->id, args[1]);
 		goto error;
 	}
 
@@ -1134,41 +1139,42 @@ static int tcp_parse_tcp_rep(char **args, int section_type, struct proxy *curpx,
  * keyword.
  */
 static int tcp_parse_tcp_req(char **args, int section_type, struct proxy *curpx,
-			     struct proxy *defpx, char *err, int errlen)
+                             struct proxy *defpx, char **err)
 {
 	const char *ptr = NULL;
 	unsigned int val;
-	int retlen;
 	int warn = 0;
 	int arg;
 	struct tcp_rule *rule;
 
 	if (!*args[1]) {
-		snprintf(err, errlen, "missing argument for '%s' in %s '%s'",
-			 args[0], proxy_type_str(curpx), curpx->id);
+		if (curpx == defpx)
+			memprintf(err, "missing argument for '%s' in defaults section", args[0]);
+		else
+			memprintf(err, "missing argument for '%s' in %s '%s'",
+			          args[0], proxy_type_str(curpx), curpx->id);
 		return -1;
 	}
 
 	if (!strcmp(args[1], "inspect-delay")) {
 		if (curpx == defpx) {
-			snprintf(err, errlen, "%s %s is not allowed in 'defaults' sections",
-				 args[0], args[1]);
+			memprintf(err, "%s %s is not allowed in 'defaults' sections",
+			          args[0], args[1]);
 			return -1;
 		}
 
 		if (!*args[2] || (ptr = parse_time_err(args[2], &val, TIME_UNIT_MS))) {
-			retlen = snprintf(err, errlen,
-					  "'%s %s' expects a positive delay in milliseconds, in %s '%s'",
-					  args[0], args[1], proxy_type_str(curpx), curpx->id);
-			if (ptr && retlen < errlen)
-				retlen += snprintf(err+retlen, errlen - retlen,
-						   " (unexpected character '%c')", *ptr);
+			memprintf(err,
+			          "'%s %s' expects a positive delay in milliseconds, in %s '%s'",
+			          args[0], args[1], proxy_type_str(curpx), curpx->id);
+			if (ptr)
+				memprintf(err, "%s (unexpected character '%c')", *err, *ptr);
 			return -1;
 		}
 
 		if (curpx->tcp_req.inspect_delay) {
-			snprintf(err, errlen, "ignoring %s %s (was already defined) in %s '%s'",
-				 args[0], args[1], proxy_type_str(curpx), curpx->id);
+			memprintf(err, "ignoring %s %s (was already defined) in %s '%s'",
+			          args[0], args[1], proxy_type_str(curpx), curpx->id);
 			return 1;
 		}
 		curpx->tcp_req.inspect_delay = val;
@@ -1181,7 +1187,7 @@ static int tcp_parse_tcp_req(char **args, int section_type, struct proxy *curpx,
 
 	if (strcmp(args[1], "content") == 0) {
 		arg++;
-		if (tcp_parse_request_rule(args, arg, section_type, curpx, defpx, rule, err, errlen) < 0)
+		if (tcp_parse_request_rule(args, arg, section_type, curpx, defpx, rule, err) < 0)
 			goto error;
 
 		if (rule->cond && (rule->cond->requires & ACL_USE_RTR_ANY)) {
@@ -1191,9 +1197,9 @@ static int tcp_parse_tcp_req(char **args, int section_type, struct proxy *curpx,
 			acl = cond_find_require(rule->cond, ACL_USE_RTR_ANY);
 			name = acl ? acl->name : "(unknown)";
 
-			retlen = snprintf(err, errlen,
-					  "acl '%s' involves some response-only criteria which will be ignored.",
-					  name);
+			memprintf(err,
+			          "acl '%s' involves some response-only criteria which will be ignored in '%s %s'",
+			          name, args[0], args[1]);
 			warn++;
 		}
 		LIST_ADDQ(&curpx->tcp_req.inspect_rules, &rule->list);
@@ -1202,12 +1208,12 @@ static int tcp_parse_tcp_req(char **args, int section_type, struct proxy *curpx,
 		arg++;
 
 		if (!(curpx->cap & PR_CAP_FE)) {
-			snprintf(err, errlen, "%s %s is not allowed because %s %s is not a frontend",
-				 args[0], args[1], proxy_type_str(curpx), curpx->id);
+			memprintf(err, "%s %s is not allowed because %s %s is not a frontend",
+			          args[0], args[1], proxy_type_str(curpx), curpx->id);
 			goto error;
 		}
 
-		if (tcp_parse_request_rule(args, arg, section_type, curpx, defpx, rule, err, errlen) < 0)
+		if (tcp_parse_request_rule(args, arg, section_type, curpx, defpx, rule, err) < 0)
 			goto error;
 
 		if (rule->cond && (rule->cond->requires & (ACL_USE_RTR_ANY|ACL_USE_L6_ANY|ACL_USE_L7_ANY))) {
@@ -1218,24 +1224,29 @@ static int tcp_parse_tcp_req(char **args, int section_type, struct proxy *curpx,
 			name = acl ? acl->name : "(unknown)";
 
 			if (acl->requires & (ACL_USE_L6_ANY|ACL_USE_L7_ANY)) {
-				retlen = snprintf(err, errlen,
-						  "'%s %s' may not reference acl '%s' which makes use of "
-						  "payload in %s '%s'. Please use '%s content' for this.",
-						  args[0], args[1], name, proxy_type_str(curpx), curpx->id, args[0]);
+				memprintf(err,
+				          "'%s %s' may not reference acl '%s' which makes use of "
+				          "payload in %s '%s'. Please use '%s content' for this.",
+				          args[0], args[1], name, proxy_type_str(curpx), curpx->id, args[0]);
 				goto error;
 			}
 			if (acl->requires & ACL_USE_RTR_ANY)
-				retlen = snprintf(err, errlen,
-						  "acl '%s' involves some response-only criteria which will be ignored.",
-						  name);
+				memprintf(err,
+				          "acl '%s' involves some response-only criteria which will be ignored in '%s %s'",
+				          name, args[0], args[1]);
 			warn++;
 		}
 		LIST_ADDQ(&curpx->tcp_req.l4_rules, &rule->list);
 	}
 	else {
-		retlen = snprintf(err, errlen,
-				  "'%s' expects 'inspect-delay', 'connection', or 'content' in %s '%s' (was '%s')",
-				  args[0], proxy_type_str(curpx), curpx->id, args[1]);
+		if (curpx == defpx)
+			memprintf(err,
+			          "'%s' expects 'inspect-delay', 'connection', or 'content' in defaults section (got '%s')",
+			          args[0], args[1]);
+		else
+			memprintf(err,
+			          "'%s' expects 'inspect-delay', 'connection', or 'content' in %s '%s' (got '%s')",
+			          args[0], args[1], proxy_type_str(curpx), curpx->id);
 		goto error;
 	}
 
@@ -1247,224 +1258,207 @@ static int tcp_parse_tcp_req(char **args, int section_type, struct proxy *curpx,
 
 
 /************************************************************************/
+/*       All supported sample fetch functios must be declared here      */
+/************************************************************************/
+
+/* Fetch the request RDP cookie identified in the args, or any cookie if no arg
+ * is passed. It is usable both for ACL and for samples. Note: this decoder
+ * only works with non-wrapping data. Accepts either 0 or 1 argument. Argument
+ * is a string (cookie name), other types will lead to undefined behaviour.
+ */
+int
+smp_fetch_rdp_cookie(struct proxy *px, struct session *l4, void *l7, unsigned int opt,
+                     const struct arg *args, struct sample *smp)
+{
+	int bleft;
+	const unsigned char *data;
+
+	if (!l4 || !l4->req)
+		return 0;
+
+	smp->flags = 0;
+	smp->type = SMP_T_CSTR;
+
+	bleft = l4->req->i;
+	if (bleft <= 11)
+		goto too_short;
+
+	data = (const unsigned char *)l4->req->p + 11;
+	bleft -= 11;
+
+	if (bleft <= 7)
+		goto too_short;
+
+	if (strncasecmp((const char *)data, "Cookie:", 7) != 0)
+		goto not_cookie;
+
+	data += 7;
+	bleft -= 7;
+
+	while (bleft > 0 && *data == ' ') {
+		data++;
+		bleft--;
+	}
+
+	if (args) {
+
+		if (bleft <= args->data.str.len)
+			goto too_short;
+
+		if ((data[args->data.str.len] != '=') ||
+		    strncasecmp(args->data.str.str, (const char *)data, args->data.str.len) != 0)
+			goto not_cookie;
+
+		data += args->data.str.len + 1;
+		bleft -= args->data.str.len + 1;
+	} else {
+		while (bleft > 0 && *data != '=') {
+			if (*data == '\r' || *data == '\n')
+				goto not_cookie;
+			data++;
+			bleft--;
+		}
+
+		if (bleft < 1)
+			goto too_short;
+
+		if (*data != '=')
+			goto not_cookie;
+
+		data++;
+		bleft--;
+	}
+
+	/* data points to cookie value */
+	smp->data.str.str = (char *)data;
+	smp->data.str.len = 0;
+
+	while (bleft > 0 && *data != '\r') {
+		data++;
+		bleft--;
+	}
+
+	if (bleft < 2)
+		goto too_short;
+
+	if (data[0] != '\r' || data[1] != '\n')
+		goto not_cookie;
+
+	smp->data.str.len = (char *)data - smp->data.str.str;
+	smp->flags = SMP_F_VOLATILE;
+	return 1;
+
+ too_short:
+	smp->flags = SMP_F_MAY_CHANGE;
+ not_cookie:
+	return 0;
+}
+
+/************************************************************************/
 /*           All supported ACL keywords must be declared here.          */
 /************************************************************************/
 
-/* copy the source IPv4/v6 address into temp_pattern */
+/* returns either 1 or 0 depending on whether an RDP cookie is found or not */
 static int
-acl_fetch_src(struct proxy *px, struct session *l4, void *l7, int dir,
-              struct acl_expr *expr, struct acl_test *test)
+acl_fetch_rdp_cookie_cnt(struct proxy *px, struct session *l4, void *l7, unsigned int opt,
+                         const struct arg *args, struct sample *smp)
+{
+	int ret;
+
+	ret = smp_fetch_rdp_cookie(px, l4, l7, opt, args, smp);
+
+	if (smp->flags & SMP_F_MAY_CHANGE)
+		return 0;
+
+	smp->flags = SMP_F_VOLATILE;
+	smp->type = SMP_T_UINT;
+	smp->data.uint = ret;
+	return 1;
+}
+
+
+/* fetch the connection's source IPv4/IPv6 address */
+static int
+smp_fetch_src(struct proxy *px, struct session *l4, void *l7, unsigned int opt,
+              const struct arg *args, struct sample *smp)
 {
 	switch (l4->si[0].addr.from.ss_family) {
 	case AF_INET:
-		temp_pattern.data.ip = ((struct sockaddr_in *)&l4->si[0].addr.from)->sin_addr;
-		temp_pattern.type = PATTERN_TYPE_IP;
+		smp->data.ipv4 = ((struct sockaddr_in *)&l4->si[0].addr.from)->sin_addr;
+		smp->type = SMP_T_IPV4;
 		break;
 	case AF_INET6:
-		temp_pattern.data.ipv6 = ((struct sockaddr_in6 *)(&l4->si[0].addr.from))->sin6_addr;
-		temp_pattern.type = PATTERN_TYPE_IPV6;
+		smp->data.ipv6 = ((struct sockaddr_in6 *)(&l4->si[0].addr.from))->sin6_addr;
+		smp->type = SMP_T_IPV6;
 		break;
 	default:
 		return 0;
 	}
 
-	test->flags = 0;
-	return 1;
-}
-
-/* extract the connection's source ipv4 address */
-static int
-pattern_fetch_src(struct proxy *px, struct session *l4, void *l7, int dir,
-                  const struct pattern_arg *arg_p, int arg_i, union pattern_data *data)
-{
-	if (l4->si[0].addr.from.ss_family != AF_INET )
-		return 0;
-
-	data->ip.s_addr = ((struct sockaddr_in *)&l4->si[0].addr.from)->sin_addr.s_addr;
-	return 1;
-}
-
-/* extract the connection's source ipv6 address */
-static int
-pattern_fetch_src6(struct proxy *px, struct session *l4, void *l7, int dir,
-                  const struct pattern_arg *arg_p, int arg_i, union pattern_data *data)
-{
-	if (l4->si[0].addr.from.ss_family != AF_INET6)
-		return 0;
-
-	memcpy(data->ipv6.s6_addr, ((struct sockaddr_in6 *)&l4->si[0].addr.from)->sin6_addr.s6_addr, sizeof(data->ipv6.s6_addr));
+	smp->flags = 0;
 	return 1;
 }
 
 /* set temp integer to the connection's source port */
 static int
-acl_fetch_sport(struct proxy *px, struct session *l4, void *l7, int dir,
-                struct acl_expr *expr, struct acl_test *test)
+smp_fetch_sport(struct proxy *px, struct session *l4, void *l7, unsigned int opt,
+                const struct arg *args, struct sample *smp)
 {
-	if (!(temp_pattern.data.integer = get_host_port(&l4->si[0].addr.from)))
+	smp->type = SMP_T_UINT;
+	if (!(smp->data.uint = get_host_port(&l4->si[0].addr.from)))
 		return 0;
 
-	test->flags = 0;
+	smp->flags = 0;
 	return 1;
 }
 
-
-/* set test->ptr to point to the frontend's IPv4/IPv6 address and test->i to the family */
+/* fetch the connection's destination IPv4/IPv6 address */
 static int
-acl_fetch_dst(struct proxy *px, struct session *l4, void *l7, int dir,
-              struct acl_expr *expr, struct acl_test *test)
+smp_fetch_dst(struct proxy *px, struct session *l4, void *l7, unsigned int opt,
+              const struct arg *args, struct sample *smp)
 {
 	stream_sock_get_to_addr(&l4->si[0]);
 
 	switch (l4->si[0].addr.to.ss_family) {
 	case AF_INET:
-		temp_pattern.data.ip = ((struct sockaddr_in *)&l4->si[0].addr.to)->sin_addr;
-		temp_pattern.type = PATTERN_TYPE_IP;
+		smp->data.ipv4 = ((struct sockaddr_in *)&l4->si[0].addr.to)->sin_addr;
+		smp->type = SMP_T_IPV4;
 		break;
 	case AF_INET6:
-		temp_pattern.data.ipv6 = ((struct sockaddr_in6 *)(&l4->si[0].addr.to))->sin6_addr;
-		temp_pattern.type = PATTERN_TYPE_IPV6;
+		smp->data.ipv6 = ((struct sockaddr_in6 *)(&l4->si[0].addr.to))->sin6_addr;
+		smp->type = SMP_T_IPV6;
 		break;
 	default:
 		return 0;
 	}
 
-	test->flags = 0;
-	return 1;
-}
-
-
-/* extract the connection's destination ipv4 address */
-static int
-pattern_fetch_dst(struct proxy *px, struct session *l4, void *l7, int dir,
-                  const struct pattern_arg *arg_p, int arg_i, union pattern_data *data)
-{
-	stream_sock_get_to_addr(&l4->si[0]);
-
-	if (l4->si[0].addr.to.ss_family != AF_INET)
-		return 0;
-
-	data->ip.s_addr = ((struct sockaddr_in *)&l4->si[0].addr.to)->sin_addr.s_addr;
-	return 1;
-}
-
-/* extract the connection's destination ipv6 address */
-static int
-pattern_fetch_dst6(struct proxy *px, struct session *l4, void *l7, int dir,
-                  const struct pattern_arg *arg_p, int arg_i, union pattern_data *data)
-{
-	stream_sock_get_to_addr(&l4->si[0]);
-
-	if (l4->si[0].addr.to.ss_family != AF_INET6)
-		return 0;
-
-	memcpy(data->ipv6.s6_addr, ((struct sockaddr_in6 *)&l4->si[0].addr.to)->sin6_addr.s6_addr, sizeof(data->ipv6.s6_addr));
+	smp->flags = 0;
 	return 1;
 }
 
 /* set temp integer to the frontend connexion's destination port */
 static int
-acl_fetch_dport(struct proxy *px, struct session *l4, void *l7, int dir,
-                struct acl_expr *expr, struct acl_test *test)
+smp_fetch_dport(struct proxy *px, struct session *l4, void *l7, unsigned int opt,
+                const struct arg *args, struct sample *smp)
 {
 	stream_sock_get_to_addr(&l4->si[0]);
 
-	if (!(temp_pattern.data.integer = get_host_port(&l4->si[0].addr.to)))
+	smp->type = SMP_T_UINT;
+	if (!(smp->data.uint = get_host_port(&l4->si[0].addr.to)))
 		return 0;
 
-	test->flags = 0;
+	smp->flags = 0;
 	return 1;
 }
 
 static int
-pattern_fetch_dport(struct proxy *px, struct session *l4, void *l7, int dir,
-                    const struct pattern_arg *arg, int i, union pattern_data *data)
+smp_fetch_payload_lv(struct proxy *px, struct session *l4, void *l7, unsigned int opt,
+                     const struct arg *arg_p, struct sample *smp)
 {
-	stream_sock_get_to_addr(&l4->si[0]);
-
-	if (!(data->integer = get_host_port(&l4->si[0].addr.to)))
-		return 0;
-
-	return 1;
-}
-
-static int
-pattern_arg_fetch_payloadlv(const char *arg, struct pattern_arg **arg_p, int *arg_i)
-{
-	int member = 0;
-	int len_offset = 0;
-	int len_size = 0;
-	int buf_offset = 0;
-	int relative = 0;
-	int arg_len = strlen(arg);
-	int i;
-
-	for (i = 0; i < arg_len; i++) {
-		if (arg[i] == ',') {
-			member++;
-		} else if (member == 0) {
-			if (arg[i] < '0' || arg[i] > '9')
-				return 0;
-
-			len_offset = 10 * len_offset + arg[i] - '0';
-		} else if (member == 1) {
-			if (arg[i] < '0' || arg[i] > '9')
-				return 0;
-
-			len_size = 10 * len_size + arg[i] - '0';
-		} else if (member == 2) {
-			if (!relative && !buf_offset && arg[i] == '+') {
-				relative = 1;
-				continue;
-			} else if (!relative && !buf_offset && arg[i] == '-') {
-				relative = 2;
-				continue;
-			} else if (arg[i] < '0' || arg[i] > '9')
-				return 0;
-
-			buf_offset = 10 * buf_offset + arg[i] - '0';
-		}
-	}
-
-	if (member < 1)
-		return 0;
-
-	if (!len_size)
-		return 0;
-
-	if (member == 1) {
-		buf_offset = len_offset + len_size;
-	}
-	else if (relative == 1) {
-		buf_offset = len_offset + len_size + buf_offset;
-	}
-	else if (relative == 2) {
-		if (len_offset + len_size < buf_offset)
-			return 0;
-
-		buf_offset = len_offset + len_size - buf_offset;
-	}
-
-	*arg_i = 3;
-	*arg_p = calloc(1, *arg_i*sizeof(struct pattern_arg));
-	(*arg_p)[0].type = PATTERN_ARG_TYPE_INTEGER;
-	(*arg_p)[0].data.integer = len_offset;
-	(*arg_p)[1].type = PATTERN_ARG_TYPE_INTEGER;
-	(*arg_p)[1].data.integer = len_size;
-	(*arg_p)[2].type = PATTERN_ARG_TYPE_INTEGER;
-	(*arg_p)[2].data.integer = buf_offset;
-
-	return 1;
-}
-
-static int
-pattern_fetch_payloadlv(struct proxy *px, struct session *l4, void *l7, int dir,
-                        const struct pattern_arg *arg_p, int arg_i, union pattern_data *data)
-{
-	int len_offset = arg_p[0].data.integer;
-	int len_size = arg_p[1].data.integer;
-	int buf_offset = arg_p[2].data.integer;
-	int buf_size = 0;
+	unsigned int len_offset = arg_p[0].data.uint;
+	unsigned int len_size = arg_p[1].data.uint;
+	unsigned int buf_offset;
+	unsigned int buf_size = 0;
 	struct buffer *b;
 	int i;
 
@@ -1475,115 +1469,122 @@ pattern_fetch_payloadlv(struct proxy *px, struct session *l4, void *l7, int dir,
 	if (!l4)
 		return 0;
 
-	b = (dir & PATTERN_FETCH_RTR) ? l4->rep : l4->req;
+	b = ((opt & SMP_OPT_DIR) == SMP_OPT_DIR_RES) ? l4->rep : l4->req;
 
-	if (!b || !b->l)
+	if (!b)
 		return 0;
 
-	if (len_offset + len_size > b->l)
-		return 0;
+	if (len_offset + len_size > b->i)
+		goto too_short;
 
 	for (i = 0; i < len_size; i++) {
-		buf_size = (buf_size << 8) + ((unsigned char *)b->w)[i + len_offset];
+		buf_size = (buf_size << 8) + ((unsigned char *)b->p)[i + len_offset];
 	}
 
-	if (!buf_size)
-		return 0;
+	/* buf offset may be implicit, absolute or relative */
+	buf_offset = len_offset + len_size;
+	if (arg_p[2].type == ARGT_UINT)
+		buf_offset = arg_p[2].data.uint;
+	else if (arg_p[2].type == ARGT_SINT)
+		buf_offset += arg_p[2].data.sint;
 
-	if (buf_offset + buf_size > b->l)
+	if (!buf_size || buf_size > b->size || buf_offset + buf_size > b->size) {
+		/* will never match */
+		smp->flags = 0;
 		return 0;
+	}
+
+	if (buf_offset + buf_size > b->i)
+		goto too_short;
 
 	/* init chunk as read only */
-	chunk_initlen(&data->str, b->w + buf_offset, 0, buf_size);
-
+	smp->type = SMP_T_CBIN;
+	chunk_initlen(&smp->data.str, b->p + buf_offset, 0, buf_size);
+	smp->flags = SMP_F_VOLATILE;
 	return 1;
+
+ too_short:
+	smp->flags = SMP_F_MAY_CHANGE;
+	return 0;
 }
 
 static int
-pattern_arg_fetch_payload (const char *arg, struct pattern_arg **arg_p, int *arg_i)
+smp_fetch_payload(struct proxy *px, struct session *l4, void *l7, unsigned int opt,
+                  const struct arg *arg_p, struct sample *smp)
 {
-	int member = 0;
-	int buf_offset = 0;
-	int buf_size = 0;
-	int arg_len = strlen(arg);
-	int i;
-
-	for (i = 0 ; i < arg_len ; i++) {
-		if (arg[i] == ',') {
-			member++;
-		} else if (member == 0) {
-			if (arg[i] < '0' || arg[i] > '9')
-				return 0;
-
-			buf_offset = 10 * buf_offset + arg[i] - '0';
-		} else if (member == 1) {
-			if (arg[i] < '0' || arg[i] > '9')
-				return 0;
-
-			buf_size = 10 * buf_size + arg[i] - '0';
-		}
-	}
-
-	if (!buf_size)
-		return 0;
-
-	*arg_i = 2;
-	*arg_p = calloc(1, *arg_i*sizeof(struct pattern_arg));
-	(*arg_p)[0].type = PATTERN_ARG_TYPE_INTEGER;
-	(*arg_p)[0].data.integer = buf_offset;
-	(*arg_p)[1].type = PATTERN_ARG_TYPE_INTEGER;
-	(*arg_p)[1].data.integer = buf_size;
-
-	return 1;
-}
-
-static int
-pattern_fetch_payload(struct proxy *px, struct session *l4, void *l7, int dir,
-                      const struct pattern_arg *arg_p, int arg_i, union pattern_data *data)
-{
-	int buf_offset = arg_p[0].data.integer;
-	int buf_size = arg_p[1].data.integer;
+	unsigned int buf_offset = arg_p[0].data.uint;
+	unsigned int buf_size = arg_p[1].data.uint;
 	struct buffer *b;
 
 	if (!l4)
 		return 0;
 
-	b = (dir & PATTERN_FETCH_RTR) ? l4->rep : l4->req;
+	b = ((opt & SMP_OPT_DIR) == SMP_OPT_DIR_RES) ? l4->rep : l4->req;
 
-	if (!b || !b->l)
+	if (!b)
 		return 0;
 
-	if (buf_offset + buf_size > b->l)
+	if (!buf_size || buf_size > b->size || buf_offset + buf_size > b->size) {
+		/* will never match */
+		smp->flags = 0;
 		return 0;
+	}
+
+	if (buf_offset + buf_size > b->i)
+		goto too_short;
 
 	/* init chunk as read only */
-	chunk_initlen(&data->str, b->w + buf_offset, 0, buf_size);
+	smp->type = SMP_T_CBIN;
+	chunk_initlen(&smp->data.str, b->p + buf_offset, 0, buf_size);
+	smp->flags = SMP_F_VOLATILE;
+	return 1;
 
+ too_short:
+	smp->flags = SMP_F_MAY_CHANGE;
+	return 0;
+}
+
+/* This function is used to validate the arguments passed to a "payload" fetch
+ * keyword. This keyword expects two positive integers, with the second one
+ * being strictly positive. It is assumed that the types are already the correct
+ * ones. Returns 0 on error, non-zero if OK. If <err_msg> is not NULL, it will be
+ * filled with a pointer to an error message in case of error, that the caller
+ * is responsible for freeing. The initial location must either be freeable or
+ * NULL.
+ */
+static int val_payload(struct arg *arg, char **err_msg)
+{
+	if (!arg[1].data.uint) {
+		if (err_msg)
+			memprintf(err_msg, "payload length must be > 0");
+		return 0;
+	}
 	return 1;
 }
 
-static int
-pattern_fetch_rdp_cookie(struct proxy *px, struct session *l4, void *l7, int dir,
-                         const struct pattern_arg *arg_p, int arg_i, union pattern_data *data)
+/* This function is used to validate the arguments passed to a "payload_lv" fetch
+ * keyword. This keyword allows two positive integers and an optional signed one,
+ * with the second one being strictly positive and the third one being greater than
+ * the opposite of the two others if negative. It is assumed that the types are
+ * already the correct ones. Returns 0 on error, non-zero if OK. If <err_msg> is
+ * not NULL, it will be filled with a pointer to an error message in case of
+ * error, that the caller is responsible for freeing. The initial location must
+ * either be freeable or NULL.
+ */
+static int val_payload_lv(struct arg *arg, char **err_msg)
 {
-	int ret;
-	struct acl_expr  expr;
-	struct acl_test  test;
-
-	if (!l4)
+	if (!arg[1].data.uint) {
+		if (err_msg)
+			memprintf(err_msg, "payload length must be > 0");
 		return 0;
+	}
 
-	memset(&expr, 0, sizeof(expr));
-	memset(&test, 0, sizeof(test));
-
-	expr.arg.str = arg_p[0].data.str.str;
-	expr.arg_len = arg_p[0].data.str.len;
-
-	ret = acl_fetch_rdp_cookie(px, l4, NULL, ACL_DIR_REQ, &expr, &test);
-	if (ret == 0 || (test.flags & ACL_TEST_F_MAY_CHANGE) || temp_pattern.data.str.len == 0)
+	if (arg[2].type == ARGT_SINT &&
+	    (int)(arg[0].data.uint + arg[1].data.uint + arg[2].data.sint) < 0) {
+		if (err_msg)
+			memprintf(err_msg, "payload offset too negative");
 		return 0;
-
-	data->str = temp_pattern.data.str;
+	}
 	return 1;
 }
 
@@ -1593,26 +1594,35 @@ static struct cfg_kw_list cfg_kws = {{ },{
 	{ 0, NULL, NULL },
 }};
 
-/* Note: must not be declared <const> as its list will be overwritten */
+/* Note: must not be declared <const> as its list will be overwritten.
+ * Please take care of keeping this list alphabetically sorted.
+ */
 static struct acl_kw_list acl_kws = {{ },{
-	{ "src_port",   acl_parse_int,   acl_fetch_sport,    acl_match_int, ACL_USE_TCP_PERMANENT  },
-	{ "src",        acl_parse_ip,    acl_fetch_src,      acl_match_ip,  ACL_USE_TCP4_PERMANENT|ACL_MAY_LOOKUP },
-	{ "dst",        acl_parse_ip,    acl_fetch_dst,      acl_match_ip,  ACL_USE_TCP4_PERMANENT|ACL_MAY_LOOKUP },
-	{ "dst_port",   acl_parse_int,   acl_fetch_dport,    acl_match_int, ACL_USE_TCP_PERMANENT  },
+	{ "dst",        acl_parse_ip,    smp_fetch_dst,      acl_match_ip,  ACL_USE_TCP4_PERMANENT|ACL_MAY_LOOKUP, 0 },
+	{ "dst_port",   acl_parse_int,   smp_fetch_dport,    acl_match_int, ACL_USE_TCP_PERMANENT, 0  },
+	{ "payload",    acl_parse_str,   smp_fetch_payload,  acl_match_str, ACL_USE_L6REQ_VOLATILE|ACL_MAY_LOOKUP, ARG2(2,UINT,UINT), val_payload },
+	{ "payload_lv", acl_parse_str, smp_fetch_payload_lv, acl_match_str, ACL_USE_L6REQ_VOLATILE|ACL_MAY_LOOKUP, ARG3(2,UINT,UINT,SINT), val_payload_lv },
+	{ "req_rdp_cookie",     acl_parse_str, smp_fetch_rdp_cookie,     acl_match_str, ACL_USE_L6REQ_VOLATILE|ACL_MAY_LOOKUP, ARG1(0,STR) },
+	{ "req_rdp_cookie_cnt", acl_parse_int, acl_fetch_rdp_cookie_cnt, acl_match_int, ACL_USE_L6REQ_VOLATILE, ARG1(0,STR) },
+	{ "src",        acl_parse_ip,    smp_fetch_src,      acl_match_ip,  ACL_USE_TCP4_PERMANENT|ACL_MAY_LOOKUP, 0 },
+	{ "src_port",   acl_parse_int,   smp_fetch_sport,    acl_match_int, ACL_USE_TCP_PERMANENT, 0  },
 	{ NULL, NULL, NULL, NULL },
 }};
 
-/* Note: must not be declared <const> as its list will be overwritten */
-static struct pattern_fetch_kw_list pattern_fetch_keywords = {{ },{
-	{ "src",         pattern_fetch_src,       NULL,                         PATTERN_TYPE_IP,        PATTERN_FETCH_REQ },
-	{ "src6",        pattern_fetch_src6,      NULL,                         PATTERN_TYPE_IPV6,      PATTERN_FETCH_REQ },
-	{ "dst",         pattern_fetch_dst,       NULL,                         PATTERN_TYPE_IP,        PATTERN_FETCH_REQ },
-	{ "dst6",        pattern_fetch_dst6,      NULL,                         PATTERN_TYPE_IPV6,      PATTERN_FETCH_REQ },
-	{ "dst_port",    pattern_fetch_dport,     NULL,                         PATTERN_TYPE_INTEGER,   PATTERN_FETCH_REQ },
-	{ "payload",     pattern_fetch_payload,   pattern_arg_fetch_payload,    PATTERN_TYPE_CONSTDATA, PATTERN_FETCH_REQ|PATTERN_FETCH_RTR },
-	{ "payload_lv",  pattern_fetch_payloadlv, pattern_arg_fetch_payloadlv,  PATTERN_TYPE_CONSTDATA, PATTERN_FETCH_REQ|PATTERN_FETCH_RTR },
-	{ "rdp_cookie",  pattern_fetch_rdp_cookie, pattern_arg_str,             PATTERN_TYPE_CONSTSTRING, PATTERN_FETCH_REQ },
-	{ NULL, NULL, NULL, 0, 0 },
+/* Note: must not be declared <const> as its list will be overwritten.
+ * Note: fetches that may return multiple types must be declared as the lowest
+ * common denominator, the type that can be casted into all other ones. For
+ * instance v4/v6 must be declared v4.
+ */
+static struct sample_fetch_kw_list sample_fetch_keywords = {{ },{
+	{ "src",         smp_fetch_src,           0,                      NULL,           SMP_T_IPV4, SMP_CAP_REQ|SMP_CAP_RES },
+	{ "dst",         smp_fetch_dst,           0,                      NULL,           SMP_T_IPV4, SMP_CAP_REQ|SMP_CAP_RES },
+	{ "dst_port",    smp_fetch_dport,         0,                      NULL,           SMP_T_UINT, SMP_CAP_REQ|SMP_CAP_RES },
+	{ "payload",     smp_fetch_payload,       ARG2(2,UINT,UINT),      val_payload,    SMP_T_CBIN, SMP_CAP_REQ|SMP_CAP_RES },
+	{ "payload_lv",  smp_fetch_payload_lv,    ARG3(2,UINT,UINT,SINT), val_payload_lv, SMP_T_CBIN, SMP_CAP_REQ|SMP_CAP_RES },
+	{ "rdp_cookie",  smp_fetch_rdp_cookie,    ARG1(1,STR),            NULL,           SMP_T_CSTR, SMP_CAP_REQ|SMP_CAP_RES },
+	{ "src_port",    smp_fetch_sport,         0,                      NULL,           SMP_T_UINT, SMP_CAP_REQ|SMP_CAP_RES },
+	{ NULL, NULL, 0, 0, 0 },
 }};
 
 __attribute__((constructor))
@@ -1620,7 +1630,7 @@ static void __tcp_protocol_init(void)
 {
 	protocol_register(&proto_tcpv4);
 	protocol_register(&proto_tcpv6);
-	pattern_register_fetches(&pattern_fetch_keywords);
+	sample_register_fetches(&sample_fetch_keywords);
 	cfg_register_keywords(&cfg_kws);
 	acl_register_keywords(&acl_kws);
 }
